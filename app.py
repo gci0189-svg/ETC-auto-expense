@@ -1,70 +1,26 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import fitz
-import io
-from datetime import datetime
-
-st.title("通行費自動對帳與標註工具")
-
-# --- 上傳區 ---
-uploaded_pdf = st.file_uploader("上傳遠通電收 PDF", type="pdf")
-uploaded_excel = st.file_uploader("上傳 T_E 申請表 Excel", type="xlsx")
+# ... 其他 import ...
 
 if uploaded_pdf and uploaded_excel:
     if st.button("開始處理"):
         # 1. 讀取 Excel
         df = pd.read_excel(uploaded_excel)
-        # 確保日期格式一致 (轉換為 YYYY/MM/DD)
-        df['服務日期'] = pd.to_datetime(df['服務日期']).dt.strftime('%Y/%m/%d')
         
-        # 2. 解析 PDF 並建立日期與費用的對應表
-        toll_map = {}
-        with pdfplumber.open(uploaded_pdf) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                for line in text.split('\n'):
-                    # 簡單邏輯：搜尋符合 YYYY/MM/DD 的行並提取金額
-                    # 實際請依據您的 PDF 結構調整邏輯
-                    parts = line.split()
-                    if len(parts) >= 3 and '/' in parts[0]:
-                        date_str = parts[0]
-                        try:
-                            # 假設金額在第三個區塊 (例如: 2025/12/31 44.3公里 29元)
-                            amount = int(parts[2].replace('元', ''))
-                            toll_map[date_str] = amount
-                        except:
-                            continue
-
-        # 3. 填入 Excel (新增新欄位或更新)
-        df['過路費'] = df['服務日期'].map(toll_map)
+        # --- 修正重點：自動尋找日期欄位 ---
+        # 檢查是否存在 '服務日期'，如果沒有，列出所有欄位名稱給您看
+        target_col = None
+        for col in df.columns:
+            if '服務日期' in str(col): # 模糊比對
+                target_col = col
+                break
         
-        # 產生新的 Excel
-        output_excel = io.BytesIO()
-        df.to_excel(output_excel, index=False)
-        st.success("Excel 處理完成！")
-        st.download_button("下載處理後的 Excel", output_excel.getvalue(), "T_E_Processed.xlsx")
-
-        # 4. 在 PDF 上標註序號
-        doc = fitz.open(stream=uploaded_pdf.read(), filetype="pdf")
+        if target_col is None:
+            st.error(f"找不到日期欄位！Excel 中的欄位名稱為: {list(df.columns)}。請確認欄位名稱是否正確。")
+            st.stop() # 停止程式
         
-        # 建立 Excel 序號對應表
-        serial_map = {}
-        for idx, row in df.iterrows():
-            if pd.notna(row['過路費']): # 假設這行有過路費，則記錄此項目序號
-                serial_map[row['服務日期']] = str(int(row['項目']))
-
-        # 遍歷頁面標註
-        for page in doc:
-            words = page.get_text("words") # 獲取所有文字座標
-            for word in words:
-                word_text = word[4]
-                if word_text in serial_map:
-                    # 在日期文字左側寫入項目序號 (紅字)
-                    page.insert_text((word[0] - 30, word[1] + 8), serial_map[word_text], 
-                                     fontsize=10, color=(1, 0, 0))
+        # 轉換日期格式
+        df[target_col] = pd.to_datetime(df[target_col]).dt.strftime('%Y/%m/%d')
+        # ----------------------------------
         
-        # 儲存 PDF
-        output_pdf = io.BytesIO()
-        doc.save(output_pdf)
-        st.download_button("下載標註序號的 PDF", output_pdf.getvalue(), "AXE-5073_Signed.pdf")
+        # ... 後續程式碼 ...
