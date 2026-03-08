@@ -25,14 +25,23 @@ def format_date(date_val):
 if uploaded_pdf and uploaded_excel:
     if st.button("開始處理"):
         try:
-            # --- 終極字體偵測 (自動掃描資料夾內所有字體檔) ---
+            # --- 終極字體偵測 (深度掃描整個專案資料夾) ---
             font_path = None
+            # 先找根目錄
             for file in os.listdir("."):
                 if file.lower().endswith((".ttc", ".ttf")):
                     font_path = file
                     break
+            # 如果根目錄沒有，往子資料夾深挖
+            if not font_path:
+                for root, dirs, files in os.walk("."):
+                    for file in files:
+                        if file.lower().endswith((".ttc", ".ttf")):
+                            font_path = os.path.join(root, file)
+                            break
+                    if font_path: break
             
-            # 如果有找到字體就用"項目"，沒找到就用"No."防呆
+            # 依據有無找到字體決定前綴
             prefix = "項目 " if font_path else "No. "
 
             pdf_bytes = uploaded_pdf.getvalue()
@@ -55,12 +64,9 @@ if uploaded_pdf and uploaded_excel:
             for row in range(header_row + 1, ws.max_row + 1):
                 d_str = format_date(ws.cell(row=row, column=date_col_idx).value)
                 
-                # ❗️【重大修正】確認這天有費用，且「還沒有被處理過」(不是 None) 才填入
+                # 只抓取第一筆
                 if d_str in toll_map and toll_map[d_str] is not None:
-                    # 1. 填入過路費 (只填第一筆)
                     ws.cell(row=row, column=toll_col_idx).value = toll_map[d_str]
-                    
-                    # 2. 抓取第一筆的項目序號，存給 PDF 標註用
                     item_val = ws.cell(row=row, column=item_col_idx).value
                     if item_val is not None:
                         try:
@@ -68,15 +74,13 @@ if uploaded_pdf and uploaded_excel:
                             serial_map[d_str] = f"{prefix}{clean_item}"
                         except:
                             serial_map[d_str] = f"{prefix}{item_val}"
-                            
-                    # 3. 標記為已處理 (設為 None)，同一天的後續項目就會直接被跳過，不會再覆蓋！
                     toll_map[d_str] = None 
             
             out_excel = io.BytesIO()
             wb.save(out_excel)
             st.session_state.processed_excel = out_excel.getvalue()
 
-            # 2. PDF 標註 (精準置中 + 支援中文字體)
+            # 2. PDF 標註
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
                 words = page.get_text("words")
@@ -88,7 +92,7 @@ if uploaded_pdf and uploaded_excel:
                 for w in words:
                     if w[4] in serial_map:
                         date_w = w
-                        # 抓取同一行的文字
+                        # 抓取同一行文字
                         line_words =[lw for lw in words if abs(lw[1] - date_w[1]) < 5]
                         line_words.sort(key=lambda x: x[0])
                         
@@ -100,7 +104,7 @@ if uploaded_pdf and uploaded_excel:
                                     toll_w = line_words[idx + 1] 
                                 break
                         
-                        # 尋找「里程」跟「通行費」的正中央座標
+                        # 尋找正中央座標
                         if km_w and toll_w:
                             mid_x = (km_w[2] + toll_w[0]) / 2 
                         else:
@@ -126,9 +130,9 @@ if uploaded_pdf and uploaded_excel:
             st.session_state.processed_pdf = out_pdf.getvalue()
             
             if font_path:
-                st.success(f"處理成功！已成功載入中文字體 ({font_path})。")
+                st.success(f"🎉 處理成功！已成功載入中文字體 ({font_path})。")
             else:
-                st.warning("處理成功！但未偵測到字體檔，已自動使用英文 No. 標示。")
+                st.warning("⚠️ 處理成功，但仍未找到字體檔。請確認您的 GitHub 專案清單中確實有上傳 .ttc 或 .ttf 檔案喔！")
                 
         except Exception as e:
             st.error(f"錯誤: {e}")
