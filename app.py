@@ -25,12 +25,11 @@ def format_date(date_val):
 if uploaded_pdf and uploaded_excel:
     if st.button("開始處理"):
         try:
-            # --- 偵測字體檔案 (加入 msjhbd.ttc 粗體支援) ---
-            font_candidates =["msjhbd.ttc", "msjhbd.ttf", "msjh.ttc", "msjh.ttf"]
+            # --- 終極字體偵測 (自動掃描資料夾內所有字體檔) ---
             font_path = None
-            for fc in font_candidates:
-                if os.path.exists(fc):
-                    font_path = fc
+            for file in os.listdir("."):
+                if file.lower().endswith((".ttc", ".ttf")):
+                    font_path = file
                     break
             
             # 如果有找到字體就用"項目"，沒找到就用"No."防呆
@@ -55,8 +54,13 @@ if uploaded_pdf and uploaded_excel:
             
             for row in range(header_row + 1, ws.max_row + 1):
                 d_str = format_date(ws.cell(row=row, column=date_col_idx).value)
-                if d_str in toll_map:
+                
+                # ❗️【重大修正】確認這天有費用，且「還沒有被處理過」(不是 None) 才填入
+                if d_str in toll_map and toll_map[d_str] is not None:
+                    # 1. 填入過路費 (只填第一筆)
                     ws.cell(row=row, column=toll_col_idx).value = toll_map[d_str]
+                    
+                    # 2. 抓取第一筆的項目序號，存給 PDF 標註用
                     item_val = ws.cell(row=row, column=item_col_idx).value
                     if item_val is not None:
                         try:
@@ -64,20 +68,22 @@ if uploaded_pdf and uploaded_excel:
                             serial_map[d_str] = f"{prefix}{clean_item}"
                         except:
                             serial_map[d_str] = f"{prefix}{item_val}"
+                            
+                    # 3. 標記為已處理 (設為 None)，同一天的後續項目就會直接被跳過，不會再覆蓋！
                     toll_map[d_str] = None 
             
             out_excel = io.BytesIO()
             wb.save(out_excel)
             st.session_state.processed_excel = out_excel.getvalue()
 
-            # 2. PDF 標註 (支援載入微軟正黑體)
+            # 2. PDF 標註 (精準置中 + 支援中文字體)
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
                 words = page.get_text("words")
                 
-                # 如果有找到中文字體，先載入到這一頁
+                # 載入中文字體
                 if font_path:
-                    page.insert_font(fontname="msjh", fontfile=font_path)
+                    page.insert_font(fontname="custom_font", fontfile=font_path)
 
                 for w in words:
                     if w[4] in serial_map:
@@ -102,12 +108,12 @@ if uploaded_pdf and uploaded_excel:
                         
                         text_to_insert = serial_map[date_w[4]]
                         
-                        # 插入文字：如果有字體檔就用自訂字體，沒有就用預設
+                        # 插入文字
                         if font_path:
                             page.insert_text((mid_x - 18, date_w[3] - 2), 
                                              text_to_insert, 
                                              fontsize=12, 
-                                             fontname="msjh", 
+                                             fontname="custom_font", 
                                              color=(0,0,0))
                         else:
                             page.insert_text((mid_x - 18, date_w[3] - 2), 
