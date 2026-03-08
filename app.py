@@ -53,19 +53,28 @@ if uploaded_pdf and uploaded_excel:
             wb.save(out_excel)
             st.session_state.processed_excel = out_excel.getvalue()
 
-            # 2. PDF 標註 (精確對齊)
+            # 2. PDF 標註 (以 y 座標歸類每一行)
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
-                words = page.get_text("words") # words 格式: (x0, y0, x1, y1, text, ...)
-                for i in range(len(words) - 2):
-                    # 邏輯：找到日期 (words[i])，里程 (words[i+1])，通行費 (words[i+2])
-                    if words[i][4] in serial_map:
-                        # 計算里程結束位置 (x1 of words[i+1]) 與 通行費開始位置 (x0 of words[i+2])
-                        x_start = words[i+1][2]
-                        x_end = words[i+2][0]
-                        # 標註放在中間
-                        center_x = (x_start + x_end) / 2
-                        page.insert_text((center_x - 20, words[i][1] + 1), serial_map[words[i][4]], fontsize=8, color=(0,0,0))
+                words = page.get_text("words")
+                # 建立一個 y 座標到文字的映射，誤差 5 以內視為同一行
+                rows = {}
+                for w in words:
+                    y_level = round(w[1] / 5) * 5
+                    if y_level not in rows: rows[y_level] = []
+                    rows[y_level].append(w)
+                
+                # 遍歷每一行找日期
+                for y, row_words in rows.items():
+                    # 依 x 座標排序該行文字
+                    row_words.sort(key=lambda x: x[0])
+                    for w in row_words:
+                        if w[4] in serial_map:
+                            # 找到日期字串後，往右找里程與通行費區域 (假設第 2 個詞是里程，第 3 個是通行費)
+                            # 如果該行沒有這麼多詞，直接定在日期右邊固定距離
+                            x_pos = w[2] + 40 
+                            # 插入文字：改為 12pt, 黑色, 顯示 "項目XX"
+                            page.insert_text((x_pos, w[3]-2), serial_map[w[4]], fontsize=12, color=(0,0,0))
             
             out_pdf = io.BytesIO()
             doc.save(out_pdf)
