@@ -28,7 +28,7 @@ if uploaded_pdf and uploaded_excel:
             wb = openpyxl.load_workbook(uploaded_excel)
             ws = wb.active
             
-            # 1. 處理 Excel
+            # 處理 Excel (鎖定您的 D欄日期、K欄過路費、A欄項目)
             header_row = 7 
             date_col_idx, toll_col_idx, item_col_idx = 4, 11, 1
             
@@ -46,35 +46,22 @@ if uploaded_pdf and uploaded_excel:
                 if d_str in toll_map:
                     ws.cell(row=row, column=toll_col_idx).value = toll_map[d_str]
                     item_val = ws.cell(row=row, column=item_col_idx).value
-                    if item_val: serial_map[d_str] = f"項目{item_val}"
+                    if item_val: serial_map[d_str] = f"項目 {item_val}"
                     toll_map[d_str] = None 
             
             out_excel = io.BytesIO()
             wb.save(out_excel)
             st.session_state.processed_excel = out_excel.getvalue()
 
-            # 2. PDF 標註 (以 y 座標歸類每一行)
+            # PDF 標註：改在行首左側，避開里程與金額
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
                 words = page.get_text("words")
-                # 建立一個 y 座標到文字的映射，誤差 5 以內視為同一行
-                rows = {}
                 for w in words:
-                    y_level = round(w[1] / 5) * 5
-                    if y_level not in rows: rows[y_level] = []
-                    rows[y_level].append(w)
-                
-                # 遍歷每一行找日期
-                for y, row_words in rows.items():
-                    # 依 x 座標排序該行文字
-                    row_words.sort(key=lambda x: x[0])
-                    for w in row_words:
-                        if w[4] in serial_map:
-                            # 找到日期字串後，往右找里程與通行費區域 (假設第 2 個詞是里程，第 3 個是通行費)
-                            # 如果該行沒有這麼多詞，直接定在日期右邊固定距離
-                            x_pos = w[2] + 40 
-                            # 插入文字：改為 12pt, 黑色, 顯示 "項目XX"
-                            page.insert_text((x_pos, w[3]-2), serial_map[w[4]], fontsize=12, color=(0,0,0))
+                    # 找到日期字串，標註在它的左邊約 70 單位處
+                    if w[4] in serial_map:
+                        # x: w[0]是日期左邊界，減去70就是行首左邊空白處
+                        page.insert_text((w[0] - 70, w[1] + 2), serial_map[w[4]], fontsize=10, color=(0,0,0))
             
             out_pdf = io.BytesIO()
             doc.save(out_pdf)
