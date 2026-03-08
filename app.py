@@ -76,7 +76,7 @@ if uploaded_pdf and uploaded_excel:
                 
                 # 如果有找到中文字體，先載入到這一頁
                 if font_path:
-                    page.insert_font(fontname="msjh", fontfile=font_path)
+                    page.insert_font(fontname="msjhbd", fontfile=font_path)
 
                 for w in words:
                     if w[4] in serial_map:
