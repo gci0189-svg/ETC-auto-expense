@@ -25,12 +25,13 @@ def format_date(date_val):
 if uploaded_pdf and uploaded_excel:
     if st.button("開始處理"):
         try:
-            # --- 偵測字體檔案 ---
+            # --- 偵測字體檔案 (加入 msjhbd.ttc 粗體支援) ---
+            font_candidates =["msjhbd.ttc", "msjhbd.ttf", "msjh.ttc", "msjh.ttf"]
             font_path = None
-            if os.path.exists("msjh.ttc"):
-                font_path = "msjh.ttc"
-            elif os.path.exists("msjh.ttf"):
-                font_path = "msjh.ttf"
+            for fc in font_candidates:
+                if os.path.exists(fc):
+                    font_path = fc
+                    break
             
             # 如果有找到字體就用"項目"，沒找到就用"No."防呆
             prefix = "項目 " if font_path else "No. "
@@ -76,7 +77,7 @@ if uploaded_pdf and uploaded_excel:
                 
                 # 如果有找到中文字體，先載入到這一頁
                 if font_path:
-                    page.insert_font(fontname="msjhbd", fontfile=font_path)
+                    page.insert_font(fontname="msjh", fontfile=font_path)
 
                 for w in words:
                     if w[4] in serial_map:
@@ -119,9 +120,9 @@ if uploaded_pdf and uploaded_excel:
             st.session_state.processed_pdf = out_pdf.getvalue()
             
             if font_path:
-                st.success("處理成功！已成功載入中文字體。")
+                st.success(f"處理成功！已成功載入中文字體 ({font_path})。")
             else:
-                st.warning("處理成功！但未偵測到字體檔(msjh.ttc)，已自動使用英文 No. 標示。")
+                st.warning("處理成功！但未偵測到字體檔，已自動使用英文 No. 標示。")
                 
         except Exception as e:
             st.error(f"錯誤: {e}")
