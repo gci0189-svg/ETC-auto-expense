@@ -27,12 +27,10 @@ if uploaded_pdf and uploaded_excel:
         try:
             # --- 終極字體偵測 (深度掃描整個專案資料夾) ---
             font_path = None
-            # 先找根目錄
             for file in os.listdir("."):
                 if file.lower().endswith((".ttc", ".ttf")):
                     font_path = file
                     break
-            # 如果根目錄沒有，往子資料夾深挖
             if not font_path:
                 for root, dirs, files in os.walk("."):
                     for file in files:
@@ -71,7 +69,8 @@ if uploaded_pdf and uploaded_excel:
                     if item_val is not None:
                         try:
                             clean_item = int(float(item_val))
-                            serial_map[d_str] = f"{prefix}{clean_item}"
+                            # ❗️【本次修改】：加上 :02d，讓個位數自動補 0 (例如 1 變成 01)
+                            serial_map[d_str] = f"{prefix}{clean_item:02d}"
                         except:
                             serial_map[d_str] = f"{prefix}{item_val}"
                     toll_map[d_str] = None 
