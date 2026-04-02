@@ -12,8 +12,8 @@ st.title("通行費自動對帳與標註工具")
 if 'processed_excel' not in st.session_state: st.session_state.processed_excel = None
 if 'processed_pdf' not in st.session_state: st.session_state.processed_pdf = None
 
-uploaded_pdf = st.file_uploader("上傳遠通電收 PDF", type="pdf")
-uploaded_excel = st.file_uploader("上傳 T_E 申請表 Excel", type="xlsx")
+uploaded_pdf = st.file_uploader("1. 上傳遠通電收 PDF", type="pdf")
+uploaded_excel = st.file_uploader("2. 上傳完整的 T_E 申請表 (含多個月份)", type="xlsx")
 
 def format_date(date_val):
     try:
@@ -22,10 +22,24 @@ def format_date(date_val):
         return str(date_val)
     except: return None
 
-if uploaded_pdf and uploaded_excel:
-    if st.button("開始處理"):
+# --- 新增：工作表選擇邏輯 ---
+selected_sheet = None
+if uploaded_excel:
+    # 預先讀取 workbook 取得工作表清單
+    temp_wb = openpyxl.load_workbook(uploaded_excel, read_only=True)
+    sheet_names = temp_wb.sheetnames
+    
+    # 智慧預設值：抓取當前月份，例如 "4月"
+    current_month_str = f"{datetime.now().month}月"
+    default_idx = sheet_names.index(current_month_str) if current_month_str in sheet_names else 0
+    
+    selected_sheet = st.selectbox("3. 選擇要處理的月份工作表", sheet_names, index=default_idx)
+    st.info(f"目前選擇處理：**{selected_sheet}**")
+
+if uploaded_pdf and uploaded_excel and selected_sheet:
+    if st.button("🚀 開始處理"):
         try:
-            # --- 終極字體偵測 (深度掃描整個專案資料夾) ---
+            # --- 終極字體偵測 ---
             font_path = None
             for file in os.listdir("."):
                 if file.lower().endswith((".ttc", ".ttf")):
@@ -39,12 +53,12 @@ if uploaded_pdf and uploaded_excel:
                             break
                     if font_path: break
             
-            # 依據有無找到字體決定前綴
             prefix = "項目 " if font_path else "No. "
-
             pdf_bytes = uploaded_pdf.getvalue()
+            
+            # --- 修改處：讀取指定的 sheet ---
             wb = openpyxl.load_workbook(uploaded_excel)
-            ws = wb.active
+            ws = wb[selected_sheet] 
             
             # 1. 處理 Excel
             header_row = 7 
@@ -53,23 +67,26 @@ if uploaded_pdf and uploaded_excel:
             toll_map, serial_map = {}, {}
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for page in pdf.pages:
-                    for line in page.extract_text().split('\n'):
-                        parts = line.split()
-                        if len(parts) >= 3 and '/' in parts[0]:
-                            if parts[2].replace('元', '').isdigit():
-                                toll_map[parts[0]] = int(parts[2].replace('元', ''))
+                    text = page.extract_text()
+                    if text:
+                        for line in text.split('\n'):
+                            parts = line.split()
+                            if len(parts) >= 3 and '/' in parts[0]:
+                                if parts[2].replace('元', '').isdigit():
+                                    toll_map[parts[0]] = int(parts[2].replace('元', ''))
             
             for row in range(header_row + 1, ws.max_row + 1):
-                d_str = format_date(ws.cell(row=row, column=date_col_idx).value)
+                raw_date = ws.cell(row=row, column=date_col_idx).value
+                if not raw_date: continue
                 
-                # 只抓取第一筆
+                d_str = format_date(raw_date)
+                
                 if d_str in toll_map and toll_map[d_str] is not None:
                     ws.cell(row=row, column=toll_col_idx).value = toll_map[d_str]
                     item_val = ws.cell(row=row, column=item_col_idx).value
                     if item_val is not None:
                         try:
                             clean_item = int(float(item_val))
-                            # ❗️【本次修改】：加上 :02d，讓個位數自動補 0 (例如 1 變成 01)
                             serial_map[d_str] = f"{prefix}{clean_item:02d}"
                         except:
                             serial_map[d_str] = f"{prefix}{item_val}"
@@ -83,15 +100,12 @@ if uploaded_pdf and uploaded_excel:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
                 words = page.get_text("words")
-                
-                # 載入中文字體
                 if font_path:
                     page.insert_font(fontname="custom_font", fontfile=font_path)
 
                 for w in words:
                     if w[4] in serial_map:
                         date_w = w
-                        # 抓取同一行文字
                         line_words =[lw for lw in words if abs(lw[1] - date_w[1]) < 5]
                         line_words.sort(key=lambda x: x[0])
                         
@@ -103,7 +117,6 @@ if uploaded_pdf and uploaded_excel:
                                     toll_w = line_words[idx + 1] 
                                 break
                         
-                        # 尋找正中央座標
                         if km_w and toll_w:
                             mid_x = (km_w[2] + toll_w[0]) / 2 
                         else:
@@ -111,32 +124,28 @@ if uploaded_pdf and uploaded_excel:
                         
                         text_to_insert = serial_map[date_w[4]]
                         
-                        # 插入文字
-                        if font_path:
-                            page.insert_text((mid_x - 18, date_w[3] - 2), 
-                                             text_to_insert, 
-                                             fontsize=12, 
-                                             fontname="custom_font", 
-                                             color=(0,0,0))
-                        else:
-                            page.insert_text((mid_x - 18, date_w[3] - 2), 
-                                             text_to_insert, 
-                                             fontsize=12, 
-                                             color=(0,0,0))
+                        page.insert_text((mid_x - 18, date_w[3] - 2), 
+                                         text_to_insert, 
+                                         fontsize=12, 
+                                         fontname="custom_font" if font_path else None, 
+                                         color=(0,0,0))
             
             out_pdf = io.BytesIO()
             doc.save(out_pdf)
             st.session_state.processed_pdf = out_pdf.getvalue()
             
             if font_path:
-                st.success(f"🎉 處理成功！已成功載入中文字體 ({font_path})。")
+                st.success(f"🎉 處理成功！工作表：{selected_sheet}")
             else:
-                st.warning("⚠️ 處理成功，但仍未找到字體檔。請確認您的 GitHub 專案清單中確實有上傳 .ttc 或 .ttf 檔案喔！")
+                st.warning("⚠️ 處理成功，但未找到字體檔。")
                 
         except Exception as e:
             st.error(f"錯誤: {e}")
 
+# --- 下載區 ---
 if st.session_state.processed_excel:
-    st.download_button("下載更新後的 Excel", st.session_state.processed_excel, uploaded_excel.name)
+    # 下載檔名自動加上月份，方便管理
+    fn = f"{selected_sheet}_更新後_{uploaded_excel.name}"
+    st.download_button("💾 下載更新後的 Excel", st.session_state.processed_excel, fn)
 if st.session_state.processed_pdf:
-    st.download_button("下載標註後的 PDF", st.session_state.processed_pdf, "標註_" + uploaded_pdf.name)
+    st.download_button("💾 下載標註後的 PDF", st.session_state.processed_pdf, f"標註_{selected_sheet}_" + uploaded_pdf.name)
