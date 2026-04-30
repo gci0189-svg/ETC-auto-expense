@@ -16,11 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import openpyxl
 import pdfplumber
-try:
-    import fitz
-    FITZ_AVAILABLE = True
-except ImportError:
-    FITZ_AVAILABLE = False
+import fitz
 import io, os, re, math
 from datetime import datetime
 
@@ -81,16 +77,8 @@ def read_mileage_allowance(excel_bytes, sheet_name):
     ws = wb[sheet_name]
     for row in ws.iter_rows():
         vals = [c.value for c in row]
-        # 掃描整行任意欄位找「小計」
-        if any(str(v).strip() == '小計' for v in vals if v is not None):
-            for idx in [9, 10, 8, 11, 7]:
-                if idx < len(vals) and vals[idx] is not None:
-                    try:
-                        v = float(vals[idx])
-                        if v > 0:
-                            return v
-                    except (TypeError, ValueError):
-                        pass
+        if vals[0] is None and vals[1] == '小計':
+            return vals[9]   # 欄J = 里程津貼小計
     return None
 
 
@@ -111,16 +99,10 @@ def parse_toll_from_pdf(pdf_bytes):
 
 
 def find_font():
-    # 先掃當前目錄
-    for f in os.listdir("."):
-        if f.lower().endswith((".ttc", ".ttf")):
-            return f
-    # 深度搜尋
-    for root, dirs, files in os.walk("."):
+    for root, _, files in os.walk("."):
         for f in files:
-            if f.lower().endswith((".ttc", ".ttf")):
+            if f.lower().endswith(('.ttc', '.ttf')):
                 return os.path.join(root, f)
-    # 系統字型
     for fp in ['/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
                '/System/Library/Fonts/PingFang.ttc',
                'C:/Windows/Fonts/msjh.ttc']:
@@ -167,8 +149,7 @@ def build_results_html(invoice_rows, mileage_allowance):
     回傳仿試算表的 HTML 字串
     """
     total_amount = sum(r[0] for r in invoice_rows)
-    total_tax    = sum(r[1] for r in invoice_rows)
-    km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
+    total_tax    = sum(r[1] for r in invoice_rows)    km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
     amt = km * 7
 
     TD    = "border:1px solid #bbb;padding:6px 10px;font-size:13px;font-family:Arial,sans-serif;"
@@ -309,100 +290,27 @@ with col_toll:
                     st.session_state.toll_excel = out_excel.getvalue()
 
                     font_path = find_font()
-                    prefix = "項目 " if font_path else "No. "
-                    # 重建 serial_map 套用正確前綴
-                    serial_map = {}
-                    for row in range(8, ws.max_row + 1):
-                        raw_date2 = ws.cell(row=row, column=DATE_COL).value
-                        if not raw_date2: continue
-                        d_str2 = format_date_slash(raw_date2)
-                        if not d_str2: continue
-                        if d_str2 in toll_map and d_str2 in matched:
-                            item_val2 = ws.cell(row=row, column=ITEM_COL).value
-                            if item_val2 is not None:
-                                try:    serial_map[d_str2] = f"{prefix}{int(float(item_val2)):02d}"
-                                except: serial_map[d_str2] = f"{prefix}{item_val2}"
-
                     toll_pdf.seek(0)
-                    pdf_raw = toll_pdf.read()
-
-                    if FITZ_AVAILABLE:
-                        doc = fitz.open(stream=pdf_raw, filetype="pdf")
-                        for page in doc:
-                            words = page.get_text("words")
-                            if font_path:
-                                try:   page.insert_font(fontname="cf", fontfile=font_path)
-                                except: font_path = None
-                            for w in words:
-                                if w[4] not in serial_map: continue
-                                dw = w
-                                lw = sorted([x for x in words if abs(x[1]-dw[1]) < 5], key=lambda x: x[0])
-                                km_w  = next((x for x in lw if "公里" in x[4]), None)
-                                toll_w = lw[lw.index(km_w)+1] if km_w and lw.index(km_w)+1 < len(lw) else None
-                                mx = (km_w[2]+toll_w[0])/2 if (km_w and toll_w) else dw[2]+140
-                                if font_path:
-                                    page.insert_text((mx-18, dw[3]-2), serial_map[w[4]], fontsize=11, fontname="cf", color=(0,0,0.7))
-                                else:
-                                    page.insert_text((mx-18, dw[3]-2), serial_map[w[4]], fontsize=11, color=(0,0,0.7))
-                        out_pdf = io.BytesIO()
-                        doc.save(out_pdf)
-                        st.session_state.toll_pdf_out = out_pdf.getvalue()
-                    else:
-                        # fitz 不可用：用 pypdf + pdfplumber 寫入 content stream
-                        from pypdf import PdfReader as _PR, PdfWriter as _PW
-                        from pypdf.generic import (
-                            ArrayObject as _AO, DictionaryObject as _DO,
-                            NameObject as _NO, DecodedStreamObject as _DSO
-                        )
-                        def _add_helv(writer, page_obj):
-                            fd = _DO({_NO("/Type"):_NO("/Font"),_NO("/Subtype"):_NO("/Type1"),
-                                      _NO("/BaseFont"):_NO("/Helvetica"),_NO("/Encoding"):_NO("/WinAnsiEncoding")})
-                            ref = writer._add_object(fd)
-                            if "/Resources" not in page_obj:
-                                page_obj[_NO("/Resources")] = _DO()
-                            res = page_obj["/Resources"]
-                            if hasattr(res,"get_object"): res = res.get_object()
-                            if "/Font" not in res: res[_NO("/Font")] = _DO()
-                            fd2 = res["/Font"]
-                            if hasattr(fd2,"get_object"): fd2 = fd2.get_object()
-                            fd2[_NO("/FHelv")] = ref
-                        def _stream(anns):
-                            ls = ["q"]
-                            for x,y,txt,r,g,b in anns:
-                                s = txt.replace("\\","\\\\").replace("(","\\(").replace(")","\\)")
-                                ls += ["BT","/FHelv 10 Tf",f"{r:.2f} {g:.2f} {b:.2f} rg",
-                                       f"{x:.2f} {y:.2f} Td",f"({s}) Tj","ET"]
-                            ls.append("Q")
-                            return "\n".join(ls).encode("latin-1")
-                        reader2 = _PR(io.BytesIO(pdf_raw))
-                        writer2 = _PW()
-                        with pdfplumber.open(io.BytesIO(pdf_raw)) as plumb2:
-                            for pi2 in range(len(reader2.pages)):
-                                writer2.add_page(reader2.pages[pi2])
-                                pg2 = writer2.pages[pi2]
-                                pp2 = plumb2.pages[pi2]
-                                ph2 = float(pp2.height)
-                                wds2 = pp2.extract_words()
-                                anns2 = []
-                                for wd in wds2:
-                                    if not re.match(r"\d{4}/\d{2}/\d{2}", wd["text"]): continue
-                                    if wd["text"] not in serial_map: continue
-                                    rw = [x for x in wds2 if abs(x["top"]-wd["top"])<5]
-                                    km2 = next((x for x in rw if "公里" in x["text"]),None)
-                                    if not km2: continue
-                                    anns2.append((km2["x1"]+5, ph2-wd["bottom"]+2, serial_map[wd["text"]], 0, 0, 0.7))
-                                if anns2:
-                                    _add_helv(writer2, pg2)
-                                    ns2 = _DSO()
-                                    ns2.set_data(_stream(anns2))
-                                    nr2 = writer2._add_object(ns2)
-                                    ex2 = pg2.get("/Contents")
-                                    if ex2 is None: pg2[_NO("/Contents")] = nr2
-                                    elif hasattr(ex2,"indirect_reference"): pg2[_NO("/Contents")] = _AO([ex2.indirect_reference,nr2])
-                                    else: pg2[_NO("/Contents")] = _AO([ex2,nr2])
-                        out2 = io.BytesIO()
-                        writer2.write(out2)
-                        st.session_state.toll_pdf_out = out2.getvalue()
+                    doc = fitz.open(stream=toll_pdf.read(), filetype="pdf")
+                    for page in doc:
+                        words = page.get_text("words")
+                        if font_path:
+                            try:   page.insert_font(fontname="cf", fontfile=font_path)
+                            except: font_path = None
+                        for w in words:
+                            if w[4] not in serial_map: continue
+                            dw = w
+                            lw = sorted([x for x in words if abs(x[1]-dw[1]) < 5], key=lambda x: x[0])
+                            km_w  = next((x for x in lw if "公里" in x[4]), None)
+                            toll_w = lw[lw.index(km_w)+1] if km_w and lw.index(km_w)+1 < len(lw) else None
+                            mx = (km_w[2]+toll_w[0])/2 if (km_w and toll_w) else dw[2]+140
+                            page.insert_text(
+                                (mx-18, dw[3]-2), serial_map[w[4]], fontsize=11,
+                                fontname="cf" if font_path else "helv", color=(0, 0, 0.7)
+                            )
+                    out_pdf = io.BytesIO()
+                    doc.save(out_pdf)
+                    st.session_state.toll_pdf_out = out_pdf.getvalue()
 
                     st.success(f"✅ 完成！共比對 **{len(matched)}** 筆通行費")
                     unmatched = set(toll_map.keys()) - matched
@@ -540,7 +448,7 @@ with col_fuel:
             label_visibility="collapsed" if i > 1 else "visible"
         )
         if v > 0:
-            tax = math.floor(v / 21)
+            tax = math.ceil(v / 1.05 * 0.05)
             invoice_rows.append((v, tax))
 
     # 有資料就即時顯示結算表
