@@ -149,7 +149,8 @@ def build_results_html(invoice_rows, mileage_allowance):
     回傳仿試算表的 HTML 字串
     """
     total_amount = sum(r[0] for r in invoice_rows)
-    total_tax    = sum(r[1] for r in invoice_rows)    km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
+    total_tax    = sum(r[1] for r in invoice_rows)
+    km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
     amt = km * 7
 
     TD    = "border:1px solid #bbb;padding:6px 10px;font-size:13px;font-family:Arial,sans-serif;"
@@ -436,7 +437,7 @@ with col_fuel:
     )
 
     st.markdown("**🧾 輸入發票金額（每張填一列）**")
-    st.caption("只需填「發票總額」，稅額自動反推 floor(總額÷21)")
+    st.caption("只需填「發票總額」，稅額自動計算 ceil(總額 ÷ 1.05 × 5%)")
 
     # 最多5張發票
     invoice_rows = []
