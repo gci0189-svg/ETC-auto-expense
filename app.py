@@ -436,21 +436,34 @@ with col_fuel:
         key="mileage_manual"
     )
 
-    st.markdown("**🧾 輸入發票金額（每張填一列）**")
-    st.caption("只需填「發票總額」，稅額自動計算 ceil(總額 ÷ 1.05 × 5%)")
+    st.markdown("**🧾 輸入發票金額**")
+    st.caption("填入發票總額，稅額自動計算（營業稅法第14條：四捨五入）")
 
-    # 最多5張發票
     invoice_rows = []
+    hc1, hc2 = st.columns([3, 2])
+    with hc1: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>發票總額</div>", unsafe_allow_html=True)
+    with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
+
     for i in range(1, 6):
-        v = st.number_input(
-            f"發票 {i}",
-            min_value=0, value=0, step=1,
-            key=f"inv_{i}",
-            label_visibility="collapsed" if i > 1 else "visible"
-        )
-        if v > 0:
-            tax = math.ceil(v / 1.05 * 0.05)
-            invoice_rows.append((v, tax))
+        ic1, ic2 = st.columns([3, 2])
+        with ic1:
+            total = st.number_input(
+                f"總額{i}", min_value=0, value=0, step=1,
+                key=f"inv_t{i}", label_visibility="collapsed"
+            )
+        with ic2:
+            # 正確公式：先四捨五入算銷售額，再四捨五入算稅額
+            if total > 0:
+                sales_auto = round(total / 1.05)
+                tax_auto   = round(sales_auto * 0.05)
+            else:
+                tax_auto = 0
+            tax = st.number_input(
+                f"稅額{i}", min_value=0, value=tax_auto, step=1,
+                key=f"inv_x{i}", label_visibility="collapsed"
+            )
+        if total > 0:
+            invoice_rows.append((total, tax))
 
     # 有資料就即時顯示結算表
     if invoice_rows:
