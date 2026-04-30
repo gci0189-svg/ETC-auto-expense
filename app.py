@@ -437,30 +437,43 @@ with col_fuel:
     )
 
     st.markdown("**🧾 輸入發票金額**")
-    st.caption("填入發票總額，稅額自動計算（營業稅法第14條：四捨五入）")
+    st.caption("填入發票總額，稅額自動帶入（可手動修改）")
 
-    invoice_rows = []
+    # 初始化 session state
+    for i in range(1, 6):
+        if f"inv_t{i}" not in st.session_state:
+            st.session_state[f"inv_t{i}"] = 0
+        if f"inv_x{i}" not in st.session_state:
+            st.session_state[f"inv_x{i}"] = 0
+
+    def auto_tax(i):
+        """總額變動時自動更新稅額"""
+        total = st.session_state[f"inv_t{i}"]
+        if total > 0:
+            sales = round(total / 1.05)
+            st.session_state[f"inv_x{i}"] = round(sales * 0.05)
+        else:
+            st.session_state[f"inv_x{i}"] = 0
+
     hc1, hc2 = st.columns([3, 2])
     with hc1: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>發票總額</div>", unsafe_allow_html=True)
     with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
 
+    invoice_rows = []
     for i in range(1, 6):
         ic1, ic2 = st.columns([3, 2])
         with ic1:
             total = st.number_input(
-                f"總額{i}", min_value=0, value=0, step=1,
-                key=f"inv_t{i}", label_visibility="collapsed"
+                f"總額{i}", min_value=0, step=1,
+                key=f"inv_t{i}",
+                on_change=auto_tax, args=(i,),
+                label_visibility="collapsed"
             )
         with ic2:
-            # 正確公式：先四捨五入算銷售額，再四捨五入算稅額
-            if total > 0:
-                sales_auto = round(total / 1.05)
-                tax_auto   = round(sales_auto * 0.05)
-            else:
-                tax_auto = 0
             tax = st.number_input(
-                f"稅額{i}", min_value=0, value=tax_auto, step=1,
-                key=f"inv_x{i}", label_visibility="collapsed"
+                f"稅額{i}", min_value=0, step=1,
+                key=f"inv_x{i}",
+                label_visibility="collapsed"
             )
         if total > 0:
             invoice_rows.append((total, tax))
