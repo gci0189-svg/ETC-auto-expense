@@ -51,9 +51,10 @@ st.markdown("""
 st.markdown("# 🚗 DN 費用申報整合工具")
 
 # Session State
-for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance','selected_sheet']:
+for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
+          'selected_sheet','mileage_manual','merged_pdf']:
     if k not in st.session_state:
-        st.session_state[k] = None
+        st.session_state[k] = None if k != 'mileage_manual' else 0
 
 # ═══════════════════════════════════════════
 # 工具函式
@@ -234,8 +235,9 @@ col_toll, col_fuel = st.columns([3, 2], gap="large")
 with col_toll:
     st.markdown('<div class="section-title">🛣️ 通行費對帳</div>', unsafe_allow_html=True)
 
-    toll_pdf = st.file_uploader("① 遠通電收 PDF", type="pdf", key="toll_pdf")
-    te_excel = st.file_uploader("② T_E 申請表 (.xlsx)", type="xlsx", key="te_main")
+    parking_pdf = st.file_uploader("① 停車費 PDF", type="pdf", key="parking_pdf")
+    toll_pdf    = st.file_uploader("② 遠通電收 PDF", type="pdf", key="toll_pdf")
+    te_excel    = st.file_uploader("③ T_E 申請表 (.xlsx)", type="xlsx", key="te_main")
 
     selected_sheet = None
     if te_excel:
@@ -243,7 +245,7 @@ with col_toll:
         sheets = wb_tmp.sheetnames
         cm = f"{datetime.now().month}月"
         default_idx = sheets.index(cm) if cm in sheets else 0
-        selected_sheet = st.selectbox("③ 選擇月份工作表", sheets, index=default_idx, key="s_main")
+        selected_sheet = st.selectbox("④ 選擇月份工作表", sheets, index=default_idx, key="s_main")
         st.session_state.selected_sheet = selected_sheet
 
         if selected_sheet:
@@ -290,6 +292,7 @@ with col_toll:
                     wb.save(out_excel)
                     st.session_state.toll_excel = out_excel.getvalue()
 
+                    # ── 標註遠通電收 PDF ──
                     font_path = find_font()
                     toll_pdf.seek(0)
                     doc = fitz.open(stream=toll_pdf.read(), filetype="pdf")
@@ -309,10 +312,103 @@ with col_toll:
                                 (mx-18, dw[3]-2), serial_map[w[4]], fontsize=11,
                                 fontname="cf" if font_path else "helv", color=(0, 0, 0.7)
                             )
-                    out_pdf = io.BytesIO()
-                    doc.save(out_pdf)
-                    st.session_state.toll_pdf_out = out_pdf.getvalue()
 
+                    # ── 標註後儲存（獨立下載用）──
+                    out_toll_only = io.BytesIO()
+                    doc.save(out_toll_only)
+                    st.session_state.toll_pdf_out = out_toll_only.getvalue()
+
+                    # ── 合併：停車費 PDF + 標註後的遠通電收 ──
+                    SIZE_LIMIT = 15 * 1024 * 1024   # 15MB
+
+                    if parking_pdf:
+                        parking_pdf.seek(0)
+                        parking_doc = fitz.open(stream=parking_pdf.read(), filetype="pdf")
+                        merged_doc  = fitz.open()
+                        merged_doc.insert_pdf(parking_doc)   # 停車費優先
+                        merged_doc.insert_pdf(doc)            # 標註後遠通電收接序
+                        parking_doc.close()
+
+                        # ── 第一次嘗試：直接合併 ──
+                        out_merged = io.BytesIO()
+                        merged_doc.save(out_merged, garbage=4, deflate=True)
+                        merged_bytes = out_merged.getvalue()
+                        merged_size  = len(merged_bytes)
+
+                        if merged_size > SIZE_LIMIT:
+                            # ── 超過 15MB → 逐步降低圖片品質壓縮 ──
+                            st.info(f"合併後 {merged_size/1024/1024:.1f}MB，開始壓縮...")
+
+                            compressed = None
+                            # 嘗試 jpeg_quality 從 85 → 75 → 60 → 45
+                            for quality in [85, 75, 60, 45]:
+                                buf = io.BytesIO()
+                                merged_doc.save(
+                                    buf,
+                                    garbage=4,
+                                    deflate=True,
+                                    deflate_images=True,
+                                    deflate_fonts=True,
+                                    # PyMuPDF 1.23+：用 linear=True 線性化並降低嵌入圖品質
+                                )
+                                # 重新開啟再以較低 DPI 重繪圖片頁
+                                comp_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
+                                out_comp = io.BytesIO()
+
+                                # 圖片頁重新渲染壓縮
+                                writer_doc = fitz.open()
+                                scale = 1.0
+                                if quality <= 75: scale = 0.85
+                                if quality <= 60: scale = 0.70
+                                if quality <= 45: scale = 0.55
+
+                                for pg in comp_doc:
+                                    mat = fitz.Matrix(scale, scale)
+                                    pix = pg.get_pixmap(matrix=mat, alpha=False)
+                                    img_pdf = fitz.open()
+                                    img_page = img_pdf.new_page(
+                                        width=pg.rect.width, height=pg.rect.height
+                                    )
+                                    img_page.insert_image(
+                                        img_page.rect,
+                                        pixmap=pix
+                                    )
+                                    writer_doc.insert_pdf(img_pdf)
+
+                                writer_doc.save(
+                                    out_comp, garbage=4, deflate=True
+                                )
+                                result = out_comp.getvalue()
+                                result_size = len(result)
+
+                                comp_doc.close()
+                                writer_doc.close()
+
+                                if result_size <= SIZE_LIMIT:
+                                    compressed = result
+                                    final_size = result_size
+                                    used_quality = quality
+                                    break
+
+                            if compressed:
+                                st.session_state['merged_pdf'] = compressed
+                                st.session_state['merged_compressed'] = True
+                                st.session_state['merged_size'] = final_size
+                                st.session_state['merged_quality'] = used_quality
+                            else:
+                                # 最終仍超過：仍給使用者下載，但警告
+                                st.session_state['merged_pdf'] = result
+                                st.session_state['merged_compressed'] = True
+                                st.session_state['merged_size'] = len(result)
+                                st.session_state['merged_quality'] = 45
+                        else:
+                            st.session_state['merged_pdf'] = merged_bytes
+                            st.session_state['merged_compressed'] = False
+                            st.session_state['merged_size'] = merged_size
+
+                        merged_doc.close()
+
+                    doc.close()
                     st.success(f"✅ 完成！共比對 **{len(matched)}** 筆通行費")
                     unmatched = set(toll_map.keys()) - matched
                     if unmatched:
@@ -324,7 +420,7 @@ with col_toll:
                     st.error(f"錯誤：{e}")
                     import traceback; st.code(traceback.format_exc())
 
-    # 下載區
+    # ── 下載區 ──
     dl1, dl2 = st.columns(2, gap="small")
     with dl1:
         if st.session_state.toll_excel:
@@ -338,11 +434,42 @@ with col_toll:
     with dl2:
         if st.session_state.toll_pdf_out and toll_pdf:
             st.download_button(
-                "💾 下載標註後的 PDF",
+                "💾 下載標註後的遠通電收",
                 st.session_state.toll_pdf_out,
                 f"標註_{selected_sheet}_{toll_pdf.name}",
                 mime="application/pdf"
             )
+
+    # 合併 PDF 下載（停車費 + 標註遠通電收）
+    if st.session_state.get('merged_pdf'):
+        size_mb  = st.session_state['merged_size'] / 1024 / 1024
+        was_comp = st.session_state.get('merged_compressed', False)
+        quality  = st.session_state.get('merged_quality', '-')
+        month_str = selected_sheet or datetime.now().strftime("%Y%m")
+
+        if was_comp:
+            label = f"💾 下載合併PDF（已壓縮 {size_mb:.1f}MB，品質等級 {quality}）"
+            if size_mb > 15:
+                st.markdown("""<div class="warn-box">
+                ⚠️ 壓縮後仍超過15MB，建議手動調整或減少頁數
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""<div class="success-box">
+                ✅ 壓縮完成：{size_mb:.1f}MB（低於15MB限制）
+                </div>""", unsafe_allow_html=True)
+        else:
+            label = f"💾 下載合併PDF（{size_mb:.1f}MB，無需壓縮）"
+            st.markdown(f"""<div class="success-box">
+            ✅ 停車費＋遠通電收合併完成：{size_mb:.1f}MB
+            </div>""", unsafe_allow_html=True)
+
+        st.download_button(
+            label,
+            data=st.session_state['merged_pdf'],
+            file_name=f"{month_str}_停車費＋通行費.pdf",
+            mime="application/pdf",
+            type="primary"
+        )
 
     # 通行費預覽
     if toll_pdf:
@@ -418,20 +545,20 @@ with col_toll:
 with col_fuel:
     st.markdown('<div class="section-title">⛽ 加油費計算</div>', unsafe_allow_html=True)
 
-    # 里程津貼：優先從左側申請表自動帶入
+    # 里程津貼：優先從左側申請表自動帶入，直接寫入 session_state 確保同步
     if st.session_state.mileage_allowance:
         mileage_val = int(st.session_state.mileage_allowance)
+        # 只在值不同時才更新，避免使用者手動修改後被覆蓋
+        if st.session_state.get("mileage_manual", 0) != mileage_val:
+            st.session_state["mileage_manual"] = mileage_val
         st.markdown(f"""
         <div class="info-box">
         📊 里程津貼自動帶入：<b>NT$ {mileage_val:,}</b>
         </div>""", unsafe_allow_html=True)
-    else:
-        mileage_val = 0
 
     mileage_input = st.number_input(
         "💰 總里程津貼（可手動修改）",
         min_value=0,
-        value=mileage_val,
         step=100,
         key="mileage_manual"
     )
