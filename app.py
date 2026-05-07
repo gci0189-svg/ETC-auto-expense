@@ -83,7 +83,64 @@ def read_mileage_allowance(excel_bytes, sheet_name):
     return None
 
 
-def parse_toll_from_pdf(pdf_bytes):
+def parse_fuel_pdf_totals(pdf_bytes):
+    """
+    從加油發票PDF解析每張發票的總計金額。
+
+    策略（按可靠度排序）：
+    1. TX行：「41.22 29.3 1208 TX」→ XXXX TX 就是發票總計
+    2. Header行：「隨碼 0095 總計 1208」→ 一行多張並排
+    3. 總計關鍵字行：「總計 1208元」
+    """
+    PAT_TX     = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx])\b')
+    PAT_TOTAL  = re.compile(r'總\s*[計計十]\s*[\$＄]?\s*(\d{3,5})')
+    PAT_CONCAT = re.compile(r'總計(\d{3,5})')
+    IN_RANGE   = lambda v: 900 <= int(v) <= 2000
+
+    all_totals = []
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+
+            # 掃描圖 → OCR
+            if len(text.strip()) < 30:
+                try:
+                    import pytesseract
+                    img = page.to_image(resolution=300).original
+                    text = pytesseract.image_to_string(
+                        img, lang='chi_tra+eng',
+                        config='--psm 6 --oem 3'
+                    )
+                except Exception:
+                    continue
+
+            page_totals = []
+            for line in text.split('\n'):
+                # 方法1：TX行（最可靠）
+                tx_vals = [int(v) for v in PAT_TX.findall(line) if IN_RANGE(v)]
+                if tx_vals:
+                    page_totals.extend(tx_vals)
+                    continue
+                # 方法2：總計關鍵字
+                for pat in [PAT_TOTAL, PAT_CONCAT]:
+                    vals = [int(v) for v in pat.findall(line) if IN_RANGE(v)]
+                    if vals:
+                        page_totals.extend(vals)
+                        break
+
+            # 去重保序
+            seen, unique = set(), []
+            for v in page_totals:
+                if v not in seen:
+                    seen.add(v)
+                    unique.append(v)
+            all_totals.extend(unique)
+
+    return all_totals
+
+
+
     toll_map = {}
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
@@ -563,18 +620,50 @@ with col_fuel:
         key="mileage_manual"
     )
 
-    st.markdown("**🧾 輸入發票金額**")
-    st.caption("填入發票總額，稅額自動帶入（可手動修改）")
+    st.markdown("**🧾 加油發票**")
 
-    # 初始化 session state
+    fuel_pdf_file = st.file_uploader(
+        "上傳加油發票PDF（自動解析總計金額）",
+        type="pdf", key="fuel_pdf_upload"
+    )
+
+    # 初始化 session state（5張）
     for i in range(1, 6):
         if f"inv_t{i}" not in st.session_state:
             st.session_state[f"inv_t{i}"] = 0
         if f"inv_x{i}" not in st.session_state:
             st.session_state[f"inv_x{i}"] = 0
 
+    # 上傳PDF後自動解析並填入
+    if fuel_pdf_file:
+        if st.button("🔍 自動解析發票金額", key="parse_fuel"):
+            with st.spinner("解析中..."):
+                fuel_pdf_file.seek(0)
+                parsed = parse_fuel_pdf_totals(fuel_pdf_file.read())
+
+            if parsed:
+                # 填入前5張，多的截掉
+                for i, total in enumerate(parsed[:5], 1):
+                    st.session_state[f"inv_t{i}"] = total
+                    sales = round(total / 1.05)
+                    st.session_state[f"inv_x{i}"] = round(sales * 0.05)
+                # 剩餘欄位清空
+                for i in range(len(parsed[:5]) + 1, 6):
+                    st.session_state[f"inv_t{i}"] = 0
+                    st.session_state[f"inv_x{i}"] = 0
+
+                st.markdown(f"""
+                <div class="success-box">
+                ✅ 解析到 <b>{len(parsed)}</b> 筆：{parsed[:5]}
+                {"（超過5張，請分批上傳）" if len(parsed) > 5 else ""}
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="warn-box">
+                ⚠️ 未自動解析到金額，請手動輸入
+                </div>""", unsafe_allow_html=True)
+
     def auto_tax(i):
-        """總額變動時自動更新稅額"""
         total = st.session_state[f"inv_t{i}"]
         if total > 0:
             sales = round(total / 1.05)
