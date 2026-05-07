@@ -33,8 +33,8 @@ st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page
 
 st.markdown("""
 <style>
-  .block-container{padding-top:1.2rem;padding-bottom:1rem}
-  h1{font-size:1.5rem!important;color:#1F4E79}
+  .block-container{padding-top:1.2rem;padding-bottom:1rem;padding-left:2rem;padding-right:2rem}
+  h1{font-size:1.3rem!important;color:#1F4E79;white-space:nowrap;overflow:visible}
   h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
   h3{font-size:1rem!important;color:#333}
   .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
