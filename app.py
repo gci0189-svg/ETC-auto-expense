@@ -33,8 +33,11 @@ st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page
 
 st.markdown("""
 <style>
-  .block-container{padding-top:1.2rem;padding-bottom:1rem;padding-left:2rem;padding-right:2rem}
-  h1{font-size:1.3rem!important;color:#1F4E79;white-space:nowrap;overflow:visible}
+  .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:100%}
+  section[data-testid="stMain"] > div {padding-left:1rem}
+  h1,h2,h3{margin-top:0}
+  h2{font-size:1.05rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
+  h3{font-size:1rem!important;color:#333}
   h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
   h3{font-size:1rem!important;color:#333}
   .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
@@ -49,8 +52,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<div style="font-size:1.3rem;font-weight:700;color:#1F4E79;'
-    'padding:0.2rem 0 1rem 0;white-space:nowrap;">🚗 DN 費用申報整合工具</div>',
+    '<p style="font-size:1rem;font-weight:700;color:#1F4E79;margin:0 0 0.8rem 0;">🚗 DN 費用申報整合工具</p>',
     unsafe_allow_html=True
 )
 
