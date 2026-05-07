@@ -48,7 +48,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("# 🚗 DN 費用申報整合工具")
+st.markdown(
+    '<div style="font-size:1.3rem;font-weight:700;color:#1F4E79;'
+    'padding:0.2rem 0 1rem 0;white-space:nowrap;">🚗 DN 費用申報整合工具</div>',
+    unsafe_allow_html=True
+)
 
 # Session State
 for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
