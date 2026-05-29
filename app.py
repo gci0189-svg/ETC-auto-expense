@@ -20,7 +20,15 @@ import fitz  # PyMuPDF
 import io, os, re, math
 from datetime import datetime
 from PIL import Image
-from pyzbar.pyzbar import decode as decode_qrcode
+
+# ─────────────────────────────────────────
+# 安全防禦性導入 pyzbar
+# ─────────────────────────────────────────
+try:
+    from pyzbar.pyzbar import decode as decode_qrcode
+    PYZBAR_AVAILABLE = True
+except ImportError:
+    PYZBAR_AVAILABLE = False
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -93,53 +101,54 @@ def parse_fuel_pdf_totals(pdf_bytes):
     """
     雙軌制加油發票解析：
     1. 優先掃描發票上的 QR Code（解碼 16 進位金額，精準度極高）
-    2. 若未偵測到條碼或失敗，自動降級至原有的 OCR + 正則匹配
+    2. 若未偵測到條碼或系統環境未就緒，自動降級至原有的 OCR + 正則匹配
     """
     all_totals = []
     qr_success = False
 
     # ────── 軌道一：優先進行 QR Code 掃描 ──────
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            # 提高渲染解析度至 300 DPI 以利解碼高密度條碼
-            pix = page.get_pixmap(dpi=300)
-            img_data = pix.tobytes("png")
-            img = Image.open(io.BytesIO(img_data))
-            
-            decoded_objs = decode_qrcode(img)
-            page_totals = []
-            
-            for obj in decoded_objs:
-                try:
-                    text = obj.data.decode('utf-8', errors='ignore').strip()
-                except Exception:
-                    continue
+    if PYZBAR_AVAILABLE:
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                pix = page.get_pixmap(dpi=300)
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
                 
-                # 台灣電子發票左側 QR Code 格式驗證：
-                # 長度至少大於 37 碼，且前 2 碼為英文字母、接續 8 碼為數字
-                if len(text) >= 37 and text[0:2].isalpha() and text[2:10].isdigit():
-                    hex_val = text[29:37]
+                decoded_objs = decode_qrcode(img)
+                page_totals = []
+                
+                for obj in decoded_objs:
                     try:
-                        total_amt = int(hex_val, 16)
-                        if 100 <= total_amt <= 5000:  # 設定合理過濾金額
-                            page_totals.append(total_amt)
-                            qr_success = True
-                    except ValueError:
-                        pass
-            
-            seen = set()
-            unique_page = []
-            for val in page_totals:
-                if val not in seen:
-                    seen.add(val)
-                    unique_page.append(val)
-            all_totals.extend(unique_page)
-            
-        doc.close()
-    except Exception as e:
-        st.warning(f"QR Code 偵測模組未就緒，自動切換至備援 OCR 機制。({e})")
+                        text = obj.data.decode('utf-8', errors='ignore').strip()
+                    except Exception:
+                        continue
+                    
+                    if len(text) >= 37 and text[0:2].isalpha() and text[2:10].isdigit():
+                        hex_val = text[29:37]
+                        try:
+                            total_amt = int(hex_val, 16)
+                            if 100 <= total_amt <= 5000:  # 設定合理過濾金額
+                                page_totals.append(total_amt)
+                                qr_success = True
+                        except ValueError:
+                            pass
+                
+                seen = set()
+                unique_page = []
+                for val in page_totals:
+                    if val not in seen:
+                        seen.add(val)
+                        unique_page.append(val)
+                all_totals.extend(unique_page)
+                
+            doc.close()
+        except Exception as e:
+            st.warning(f"QR Code 偵測執行異常，轉用備援 OCR 模式。({e})")
+            qr_success = False
+    else:
+        st.info("ℹ️ 系統偵測到雲端 C 語言環境尚未安裝完畢，目前正以「傳統 OCR 備援模式」解析發票。")
         qr_success = False
 
     if qr_success and all_totals:
@@ -169,12 +178,10 @@ def parse_fuel_pdf_totals(pdf_bytes):
 
             page_totals = []
             for line in text.split('\n'):
-                # 匹配 TX 行
                 tx_vals = [int(v) for v in PAT_TX.findall(line) if IN_RANGE(v)]
                 if tx_vals:
                     page_totals.extend(tx_vals)
                     continue
-                # 匹配總計關鍵字
                 for pat in [PAT_TOTAL, PAT_CONCAT]:
                     vals = [int(v) for v in pat.findall(line) if IN_RANGE(v)]
                     if vals:
