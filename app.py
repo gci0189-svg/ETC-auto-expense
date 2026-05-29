@@ -8,7 +8,7 @@ DN 費用申報整合工具 v4
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
-  pip install streamlit openpyxl pdfplumber pymupdf pypdf
+  pip install streamlit openpyxl pdfplumber pymupdf pypdf pyzbar pillow opencv-python-headless
   streamlit run app.py
 """
 
@@ -16,9 +16,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 import openpyxl
 import pdfplumber
-import fitz
+import fitz  # PyMuPDF
 import io, os, re, math
 from datetime import datetime
+from PIL import Image
+from pyzbar.pyzbar import decode as decode_qrcode
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -36,8 +38,6 @@ st.markdown("""
   .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:100%}
   section[data-testid="stMain"] > div {padding-left:1rem}
   h1,h2,h3{margin-top:0}
-  h2{font-size:1.05rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
-  h3{font-size:1rem!important;color:#333}
   h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
   h3{font-size:1rem!important;color:#333}
   .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
@@ -85,31 +85,77 @@ def read_mileage_allowance(excel_bytes, sheet_name):
     for row in ws.iter_rows():
         vals = [c.value for c in row]
         if vals[0] is None and vals[1] == '小計':
-            return vals[9]   # 欄J = 里程津貼小計
+            return vals[9]   # 欄J = 里量津貼小計
     return None
 
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    從加油發票PDF解析每張發票的總計金額。
-
-    策略（按可靠度排序）：
-    1. TX行：「41.22 29.3 1208 TX」→ XXXX TX 就是發票總計
-    2. Header行：「隨碼 0095 總計 1208」→ 一行多張並排
-    3. 總計關鍵字行：「總計 1208元」
+    雙軌制加油發票解析：
+    1. 優先掃描發票上的 QR Code（解碼 16 進位金額，精準度極高）
+    2. 若未偵測到條碼或失敗，自動降級至原有的 OCR + 正則匹配
     """
-    PAT_TX     = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx])\b')
-    PAT_TOTAL  = re.compile(r'總\s*[計計十]\s*[\$＄]?\s*(\d{3,5})')
-    PAT_CONCAT = re.compile(r'總計(\d{3,5})')
-    IN_RANGE   = lambda v: 900 <= int(v) <= 2000
-
     all_totals = []
+    qr_success = False
+
+    # ────── 軌道一：優先進行 QR Code 掃描 ──────
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            # 提高渲染解析度至 300 DPI 以利解碼高密度條碼
+            pix = page.get_pixmap(dpi=300)
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            decoded_objs = decode_qrcode(img)
+            page_totals = []
+            
+            for obj in decoded_objs:
+                try:
+                    text = obj.data.decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    continue
+                
+                # 台灣電子發票左側 QR Code 格式驗證：
+                # 長度至少大於 37 碼，且前 2 碼為英文字母、接續 8 碼為數字
+                if len(text) >= 37 and text[0:2].isalpha() and text[2:10].isdigit():
+                    hex_val = text[29:37]
+                    try:
+                        total_amt = int(hex_val, 16)
+                        if 100 <= total_amt <= 5000:  # 設定合理過濾金額
+                            page_totals.append(total_amt)
+                            qr_success = True
+                    except ValueError:
+                        pass
+            
+            seen = set()
+            unique_page = []
+            for val in page_totals:
+                if val not in seen:
+                    seen.add(val)
+                    unique_page.append(val)
+            all_totals.extend(unique_page)
+            
+        doc.close()
+    except Exception as e:
+        st.warning(f"QR Code 偵測模組未就緒，自動切換至備援 OCR 機制。({e})")
+        qr_success = False
+
+    if qr_success and all_totals:
+        return all_totals
+
+    # ────── 軌道二：備援 OCR 機制 ──────
+    all_totals = []
+    PAT_TX     = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
+    PAT_TOTAL  = re.compile(r'(?:總\s*[計計十十訁]|額\s*[計計])\s*[\$＄]?\s*(\d{3,5})')
+    PAT_CONCAT = re.compile(r'總計(\d{3,5})')
+    IN_RANGE   = lambda v: 500 <= int(v) <= 5000
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
 
-            # 掃描圖 → OCR
             if len(text.strip()) < 30:
                 try:
                     import pytesseract
@@ -123,12 +169,12 @@ def parse_fuel_pdf_totals(pdf_bytes):
 
             page_totals = []
             for line in text.split('\n'):
-                # 方法1：TX行（最可靠）
+                # 匹配 TX 行
                 tx_vals = [int(v) for v in PAT_TX.findall(line) if IN_RANGE(v)]
                 if tx_vals:
                     page_totals.extend(tx_vals)
                     continue
-                # 方法2：總計關鍵字
+                # 匹配總計關鍵字
                 for pat in [PAT_TOTAL, PAT_CONCAT]:
                     vals = [int(v) for v in pat.findall(line) if IN_RANGE(v)]
                     if vals:
@@ -146,7 +192,10 @@ def parse_fuel_pdf_totals(pdf_bytes):
     return all_totals
 
 
-
+def parse_toll_from_pdf(pdf_bytes):
+    """
+    解析通行費PDF
+    """
     toll_map = {}
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
@@ -209,7 +258,7 @@ def remove_pdf_password_and_extract_page1(pdf_bytes, password=""):
 
 def build_results_html(invoice_rows, mileage_allowance):
     """
-    invoice_rows: list of (total, tax)  每張發票
+    invoice_rows: list of (total, tax) 每張發票
     回傳仿試算表的 HTML 字串
     """
     total_amount = sum(r[0] for r in invoice_rows)
@@ -403,7 +452,6 @@ with col_toll:
                             st.info(f"合併後 {merged_size/1024/1024:.1f}MB，開始壓縮...")
 
                             compressed = None
-                            # 嘗試 jpeg_quality 從 85 → 75 → 60 → 45
                             for quality in [85, 75, 60, 45]:
                                 buf = io.BytesIO()
                                 merged_doc.save(
@@ -412,9 +460,7 @@ with col_toll:
                                     deflate=True,
                                     deflate_images=True,
                                     deflate_fonts=True,
-                                    # PyMuPDF 1.23+：用 linear=True 線性化並降低嵌入圖品質
                                 )
-                                # 重新開啟再以較低 DPI 重繪圖片頁
                                 comp_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
                                 out_comp = io.BytesIO()
 
@@ -459,7 +505,6 @@ with col_toll:
                                 st.session_state['merged_size'] = final_size
                                 st.session_state['merged_quality'] = used_quality
                             else:
-                                # 最終仍超過：仍給使用者下載，但警告
                                 st.session_state['merged_pdf'] = result
                                 st.session_state['merged_compressed'] = True
                                 st.session_state['merged_size'] = len(result)
@@ -611,7 +656,6 @@ with col_fuel:
     # 里程津貼：優先從左側申請表自動帶入，直接寫入 session_state 確保同步
     if st.session_state.mileage_allowance:
         mileage_val = int(st.session_state.mileage_allowance)
-        # 只在值不同時才更新，避免使用者手動修改後被覆蓋
         if st.session_state.get("mileage_manual", 0) != mileage_val:
             st.session_state["mileage_manual"] = mileage_val
         st.markdown(f"""
