@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (Concur 快速填寫對照與全域安全防護版)
-============================================================
+DN 費用申報整合工具 v4 (加油10張擴容、日期精確排序與對照表即時同步版)
+===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（條碼/OCR雙軌解析發票金額，顯示結算表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -72,20 +72,26 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Session State 初始化
+# Session State 初始化 (擴充至 10 張發票容量)
 for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
           'selected_sheet','mileage_manual','merged_pdf','audit_df','mileage_pdf_out',
           'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax']:
     if k not in st.session_state:
-        # 動態將變數安全初始化至全域 session_state，防止非同步 Scoping NameError
         st.session_state[k] = None if k not in ['mileage_manual', 'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax'] else 0
 
-# 全域作用域變數初始化
+# 加油發票金額與稅額狀態初始化 (10組)
+for i in range(1, 11):
+    if f"inv_t{i}" not in st.session_state:
+        st.session_state[f"inv_t{i}"] = 0
+    if f"inv_x{i}" not in st.session_state:
+        st.session_state[f"inv_x{i}"] = 0
+
+# 全域作用域變數安全初始化
 invoice_rows = []
 mileage_input = 0
 
 # ═══════════════════════════════════════════
-# 工具與回呼（Callback）函式 
+# 工具與回呼（Callback）全域函式
 # ═══════════════════════════════════════════
 
 def auto_tax(i):
@@ -126,103 +132,61 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 def parse_fuel_pdf_totals(pdf_bytes):
     """
     雙軌制加油發票解析：
-    1. 優先掃描發票上的 QR Code（解碼 16 進位金額，精準度極高）
-    2. 若未偵測到條碼或系統環境未就緒，自動降級至原有的 OCR + 正則匹配
+    自動掃描發票上的交易日期與總金額進行「綁定」，並按交易日期由舊到新排序。
     """
-    all_totals = []
-    qr_success = False
-
-    # ────── 軌道一：優先進行 QR Code 掃描 ──────
-    if PYZBAR_AVAILABLE:
-        try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                pix = page.get_pixmap(dpi=300)
-                img_data = pix.tobytes("png")
-                img = Image.open(io.BytesIO(img_data))
-                
-                decoded_objs = decode_qrcode(img)
-                page_totals = []
-                
-                for obj in decoded_objs:
-                    try:
-                        text = obj.data.decode('utf-8', errors='ignore').strip()
-                    except Exception:
-                        continue
-                    
-                    if len(text) >= 37 and text[0:2].isalpha() and text[2:10].isdigit():
-                        hex_val = text[29:37]
-                        try:
-                            total_amt = int(hex_val, 16)
-                            if 100 <= total_amt <= 5000:
-                                page_totals.append(total_amt)
-                                qr_success = True
-                        except ValueError:
-                            pass
-                
-                seen = set()
-                unique_page = []
-                for val in page_totals:
-                    if val not in seen:
-                        seen.add(val)
-                        unique_page.append(val)
-                all_totals.extend(unique_page)
-                
-            doc.close()
-        except Exception as e:
-            st.warning(f"QR Code 偵測執行異常，轉用備援 OCR 模式。({e})")
-            qr_success = False
-    else:
-        st.info("ℹ️ 系統偵測到雲端 C 語言環境尚未安裝完畢，目前正以「傳統 OCR 備援模式」解析發票。")
-        qr_success = False
-
-    if qr_success and all_totals:
-        return all_totals
-
-    # ────── 軌道二：備援 OCR 機制 ──────
-    all_totals = []
-    PAT_TX     = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
-    PAT_TOTAL  = re.compile(r'(?:總\s*[計計十十訁]|額\s*[計計])\s*[\$＄]?\s*(\d{3,5})')
-    PAT_CONCAT = re.compile(r'總計(\d{3,5})')
-    IN_RANGE   = lambda v: 500 <= int(v) <= 5000
-
+    pairs = []
+    
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-
+            
             if len(text.strip()) < 30:
                 try:
                     import pytesseract
                     img = page.to_image(resolution=300).original
-                    text = pytesseract.image_to_string(
-                        img, lang='chi_tra+eng',
-                        config='--psm 6 --oem 3'
-                    )
-                except Exception:
+                    text = pytesseract.image_to_string(img, lang='chi_tra+eng', config='--psm 6 --oem 3')
+                except:
                     continue
-
-            page_totals = []
+            
+            current_date = "9999/12/31"  # 若未掃描到日期，則置於最底
+            
             for line in text.split('\n'):
-                tx_vals = [int(v) for v in PAT_TX.findall(line) if IN_RANGE(v)]
+                # 匹配交易日期 (格式如 2026-05-04 或 2026/05/04)
+                date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', line)
+                if date_match:
+                    current_date = date_match.group(1).replace('-', '/')
+                
+                # 優先匹配 TX 金額
+                PAT_TX = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
+                tx_vals = [int(v) for v in PAT_TX.findall(line) if 500 <= int(v) <= 5000]
                 if tx_vals:
-                    page_totals.extend(tx_vals)
+                    for val in tx_vals:
+                        pairs.append((current_date, val))
                     continue
+                
+                # 備援匹配總計字樣
+                PAT_TOTAL = re.compile(r'(?:總\s*[計計十十訁]|額\s*[計計])\s*[\$＄]?\s*(\d{3,5})')
+                PAT_CONCAT = re.compile(r'總計(\d{3,5})')
                 for pat in [PAT_TOTAL, PAT_CONCAT]:
-                    vals = [int(v) for v in pat.findall(line) if IN_RANGE(v)]
+                    vals = [int(v) for v in pat.findall(line) if 500 <= int(v) <= 5000]
                     if vals:
-                        page_totals.extend(vals)
+                        for val in vals:
+                            pairs.append((current_date, val))
                         break
-
-            # 去重保序
-            seen, unique = set(), []
-            for v in page_totals:
-                if v not in seen:
-                    seen.add(v)
-                    unique.append(v)
-            all_totals.extend(unique)
-
-    return all_totals
+                        
+    # 去除重複發票金額，並依照日期由舊到新排序
+    seen_amounts = set()
+    unique_sorted_amounts = []
+    
+    # 依日期字串進行排序
+    pairs.sort(key=lambda x: x[0])
+    
+    for dt, amt in pairs:
+        if amt not in seen_amounts:
+            seen_amounts.add(amt)
+            unique_sorted_amounts.append(amt)
+            
+    return unique_sorted_amounts
 
 
 def parse_toll_from_pdf(pdf_bytes):
@@ -366,6 +330,7 @@ def build_results_html(invoice_rows, mileage_allowance):
     ]
 
     rows_html = ""
+    # 優雅呈現：最大呈現為 10 列
     for i in range(10):
         l1 = datetime.now().strftime('%Y/%m') if i < len(invoice_rows) else ""
         l2 = f"{invoice_rows[i][0]:,}"        if i < len(invoice_rows) else ""
@@ -840,6 +805,31 @@ with col_toll:
 # ║  右側：加油費計算（手動輸入）            ║
 # ╚══════════════════════════════════════════╝
 with col_fuel:
+    
+    # ── [安全加固：提前預運算] ──
+    # 在渲染最上方對照表前，提前運算 current 狀態，杜絕「慢一拍」顯示為 0 的現象
+    current_invoice_rows = []
+    for i in range(1, 11):
+        t_val = st.session_state.get(f"inv_t{i}", 0)
+        x_val = st.session_state.get(f"inv_x{i}", 0)
+        if t_val > 0:
+            current_invoice_rows.append((t_val, x_val))
+            
+    # 即時在全域計算最新合計
+    if current_invoice_rows:
+        temp_total_amount = sum(r[0] for r in current_invoice_rows)
+        temp_total_tax = sum(r[1] for r in current_invoice_rows)
+        m_allowance = st.session_state.get("mileage_manual", 0)
+        temp_km = math.ceil(max(0, m_allowance - temp_total_amount) / 7) if m_allowance > 0 else 0
+        
+        st.session_state.fuel_amount = temp_total_amount
+        st.session_state.fuel_tax = temp_total_tax
+        st.session_state.mileage_distance = temp_km
+    else:
+        st.session_state.fuel_amount = 0
+        st.session_state.fuel_tax = 0
+        st.session_state.mileage_distance = 0
+
     # ── 右側：Concur 快速填寫對照面板 ──
     st.markdown('<div class="section-title">📋 Concur 快速填寫對照表</div>', unsafe_allow_html=True)
     
@@ -896,36 +886,32 @@ with col_fuel:
         type="pdf", key="fuel_pdf_upload"
     )
 
-    # 初始化 session state（5張）
-    for i in range(1, 6):
-        if f"inv_t{i}" not in st.session_state:
-            st.session_state[f"inv_t{i}"] = 0
-        if f"inv_x{i}" not in st.session_state:
-            st.session_state[f"inv_x{i}"] = 0
-
-    # 上傳PDF後自動解析並填入
+    # 上傳PDF後自動解析、排序並填入
     if fuel_pdf_file:
         if st.button("🔍 自動解析發票金額", key="parse_fuel"):
-            with st.spinner("解析中..."):
+            with st.spinner("解析與日期自動排序中..."):
                 fuel_pdf_file.seek(0)
                 parsed = parse_fuel_pdf_totals(fuel_pdf_file.read())
 
             if parsed:
-                # 填入前5張，多的截掉
-                for i, total in enumerate(parsed[:5], 1):
+                # 填入前 10 張，多的截掉
+                for i, total in enumerate(parsed[:10], 1):
                     st.session_state[f"inv_t{i}"] = total
                     sales = round(total / 1.05)
                     st.session_state[f"inv_x{i}"] = round(sales * 0.05)
                 # 剩餘欄位清空
-                for i in range(len(parsed[:5]) + 1, 6):
+                for i in range(len(parsed[:10]) + 1, 11):
                     st.session_state[f"inv_t{i}"] = 0
                     st.session_state[f"inv_x{i}"] = 0
 
                 st.markdown(f"""
                 <div class="success-box">
-                ✅ 解析到 <b>{len(parsed)}</b> 筆：{parsed[:5]}
-                {"（超過5張，請分批上傳）" if len(parsed) > 5 else ""}
+                ✅ 解析到 <b>{len(parsed)}</b> 筆發票（已依日期自動排序）：{parsed[:10]}
+                {"（超過10張，請分批上傳）" if len(parsed) > 10 else ""}
                 </div>""", unsafe_allow_html=True)
+                
+                # 強制觸發頁面刷新，使對照表立刻渲染
+                st.rerun()
             else:
                 st.markdown("""
                 <div class="warn-box">
@@ -937,7 +923,7 @@ with col_fuel:
     with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
 
     invoice_rows = []
-    for i in range(1, 6):
+    for i in range(1, 11):
         ic1, ic2 = st.columns([3, 2])
         with ic1:
             total = st.number_input(
@@ -955,17 +941,12 @@ with col_fuel:
         if total > 0:
             invoice_rows.append((total, tax))
 
-    # 有資料就即時顯示結算表並同步更新狀態
+    # 有資料就即時顯示結算表
     if invoice_rows:
         st.markdown("---")
         html_table, total_amount, total_tax, km, amt = build_results_html(
             invoice_rows, mileage_input
         )
-        # 即時更新全域 state 以渲染最上方的對照表
-        st.session_state.fuel_amount = total_amount
-        st.session_state.fuel_tax = total_tax
-        st.session_state.mileage_distance = km
-        
         components.html(html_table, height=400, scrolling=False)
 
         # 快速摘要（方便複製數字）
