@@ -1,6 +1,6 @@
 """
-DN 費用申報整合工具 v4 (鎖定一頁寬 PDF 匯出與 Bug 修正版)
-======================================================
+DN 費用申報整合工具 v4 (官方格式吻合 PDF 匯出與 PageSetup 注入版)
+============================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
@@ -8,7 +8,7 @@ DN 費用申報整合工具 v4 (鎖定一頁寬 PDF 匯出與 Bug 修正版)
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
-  pip install streamlit openpyxl pdfplumber pymupdf pypdf pyzbar pillow opencv-python-headless pandas reportlab
+  pip install streamlit openpyxl pdfplumber pymupdf pypdf pyzbar pillow opencv-python-headless pandas
   streamlit run app.py
 """
 
@@ -19,11 +19,14 @@ import pdfplumber
 import fitz  # PyMuPDF
 import io, os, re, math
 import pandas as pd
+import shutil
+import tempfile
+import subprocess
 from datetime import datetime
 from PIL import Image
 
 # ─────────────────────────────────────────
-# 安全防禦性導入 pyzbar
+# 安全防禦性與系統環境檢測
 # ─────────────────────────────────────────
 try:
     from pyzbar.pyzbar import decode as decode_qrcode
@@ -36,6 +39,10 @@ try:
     PYPDF_AVAILABLE = True
 except ImportError:
     PYPDF_AVAILABLE = False
+
+# 檢測雲端主機中是否安裝有 LibreOffice 執行檔
+SOFFICE_PATH = shutil.which('soffice') or shutil.which('libreoffice')
+LIBREOFFICE_AVAILABLE = SOFFICE_PATH is not None
 
 # ─────────────────────────────────────────
 # 頁面設定
@@ -78,7 +85,6 @@ for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
 def format_date_slash(v):
     try:
         if isinstance(v, str):
-            # 嘗試轉換不同常見日期字串 (處理 29-May-26 或 2026/05/29)
             return pd.to_datetime(v.strip()).strftime('%Y/%m/%d')
         if hasattr(v, 'strftime'):
             return v.strftime('%Y/%m/%d')
@@ -237,250 +243,60 @@ def find_font():
 
 def convert_excel_to_pdf(excel_bytes, sheet_name):
     """
-    將指定月份的 Excel 里程明細工作表轉換為 A4 橫向 PDF 文件。
-    [一頁寬優化]：嚴格鎖定橫向寬度為 725pt，對客戶、里程備註進行垂直自動換行。
+    [高精準度 PDF 生成]：使用無頭 LibreOffice 將原始 Excel 工作表直接轉換成符合官方排版規範的 PDF，
+    並在背景將當月報表以外的其他工作表刪除，確保產出的 PDF 只有「指定的當月明細表」，且完美一頁寬。
     """
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    
-    # ── 註冊中文字型 ──
-    FONT_NAME = 'Helvetica'
-    font_path = find_font()
-    if font_path:
-        try:
-            pdfmetrics.registerFont(TTFont('ChineseFont', font_path))
-            FONT_NAME = 'ChineseFont'
-        except Exception:
-            try:
-                pdfmetrics.registerFont(TTFont('ChineseFont', font_path, index=0))
-                FONT_NAME = 'ChineseFont'
-            except Exception:
-                pass
-
-    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
-    if sheet_name not in wb.sheetnames:
+    if not LIBREOFFICE_AVAILABLE:
         return None
-    ws = wb[sheet_name]
-    
-    # 樣式定義（字型設定為較緊湊的 8pt，提升排版緊湊度）
-    style_normal = ParagraphStyle(
-        name='CellNormal',
-        fontName=FONT_NAME,
-        fontSize=8,
-        leading=10,
-        alignment=1  # 居中
-    )
-    style_work = ParagraphStyle(
-        name='CellWork',
-        fontName=FONT_NAME,
-        fontSize=8,
-        leading=10,
-        alignment=0  # 居左（適於客戶、備註等長字串）
-    )
-    style_header = ParagraphStyle(
-        name='CellHeader',
-        fontName=FONT_NAME,
-        fontSize=8.5,
-        leading=11,
-        textColor=colors.whitesmoke,
-        alignment=1
-    )
-    style_title = ParagraphStyle(
-        name='TitleStyle',
-        fontName=FONT_NAME,
-        fontSize=13,
-        leading=17,
-        alignment=1,
-        textColor=colors.HexColor('#1F4E79')
-    )
-    
-    data_table = []
-    is_first_row = True
-    
-    # 從第 7 行（表頭行）開始提取明細（包含過路費、停車費，共 12 欄 A~L）
-    for r in range(7, ws.max_row + 1):
-        row_vals = []
-        has_data = False
-        for c in range(1, 13):  # 欄位 A 至 L (1 至 12)
-            cell_val = ws.cell(row=r, column=c).value
-            if cell_val is not None:
-                has_data = True
-                if hasattr(cell_val, 'strftime'):
-                    cell_val = cell_val.strftime('%Y/%m/%d')
-                val_str = str(cell_val)
-            else:
-                val_str = ""
-            
-            # 使用 Paragraph 包裹以支援垂直自動換行，杜絕橫向溢出
-            if is_first_row:
-                p = Paragraph(val_str, style_header)
-            else:
-                # 客戶 (c=5)、里程備註 (c=8) 居左對齊，其餘居中
-                p_style = style_work if c in [5, 8] else style_normal
-                p = Paragraph(val_str, p_style)
-            row_vals.append(p)
-        
-        if has_data:
-            data_table.append(row_vals)
-            is_first_row = False
-            
-    if not data_table:
-        return None
-        
-    pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        pdf_buffer,
-        pagesize=landscape(A4),
-        leftMargin=36,
-        rightMargin=36,
-        topMargin=36,
-        bottomMargin=36
-    )
-    
-    story = []
-    story.append(Paragraph(f"DN 里程申報明細表 ({sheet_name})", style_title))
-    story.append(Spacer(1, 12))
-    
-    # 12 欄物理列寬精密分配（總寬 725pt，完美適配 A4 橫式）
-    col_widths = [25, 45, 65, 60, 130, 40, 40, 140, 40, 50, 45, 45]
-    t = Table(data_table, colWidths=col_widths, repeatRows=1)
-    
-    # 表格美化樣式
-    t_style = TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F4E79')),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-    ])
-    
-    # 奇偶數行交替背景色
-    for idx in range(1, len(data_table)):
-        bg_color = colors.HexColor('#F9FBFD') if idx % 2 == 1 else colors.white
-        t_style.add('BACKGROUND', (0, idx), (-1, idx), bg_color)
-        
-    t.setStyle(t_style)
-    story.append(t)
-    
-    doc.build(story)
-    return pdf_buffer.getvalue()
-
-
-def remove_pdf_password_and_extract_page1(pdf_bytes, password=""):
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        total_pages = len(doc)
-        if doc.is_encrypted:
-            if not doc.authenticate(password):
-                doc.close()
-                return False, None, f"密碼錯誤（嘗試：「{password}」）"
-        new_doc = fitz.open()
-        new_doc.insert_pdf(doc, from_page=0, to_page=0)
-        out = io.BytesIO()
-        new_doc.save(out, encryption=fitz.PDF_ENCRYPT_NONE)
-        new_doc.close(); doc.close()
-        return True, out.getvalue(), f"成功！已移除密碼並擷取第1頁（共 {total_pages} 頁）"
-    except Exception:
-        pass
-    if PYPDF_AVAILABLE:
+        # 1. 載入 Excel 檔案，並只保留選定的工作表，避免多餘空月份污染 PDF
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+        for name in list(wb.sheetnames):
+            if name != sheet_name:
+                del wb[name]
+                
+        # 2. 注入頁面列印設定，強制一頁寬，橫向 A4 列印
+        ws = wb[sheet_name]
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = '9'  # A4 代碼
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0  # 高度自適應往下延伸
+        wb.active = 0
+        
+        # 3. 寫入暫存檔
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_xlsx:
+            xlsx_path = tmp_xlsx.name
+            wb.save(xlsx_path)
+            
+        # 4. 調用雲端 LibreOffice 進行 headless 轉換
+        output_dir = tempfile.gettempdir()
+        cmd = [
+            SOFFICE_PATH,
+            '--headless',
+            '--convert-to', 'pdf',
+            '--outdir', output_dir,
+            xlsx_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        pdf_filename = os.path.basename(xlsx_path).replace('.xlsx', '.pdf')
+        pdf_path = os.path.join(output_dir, pdf_filename)
+        
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+            
+        # 清理暫存檔案
         try:
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            if reader.is_encrypted:
-                if reader.decrypt(password) == 0:
-                    return False, None, f"密碼錯誤（嘗試：「{password}」）"
-            writer = PdfWriter()
-            writer.add_page(reader.pages[0])
-            out = io.BytesIO()
-            writer.write(out)
-            return True, out.getvalue(), f"成功（備援）！擷取第1頁（共 {len(reader.pages)} 頁）"
-        except Exception as e:
-            return False, None, f"處理失敗：{e}"
-    return False, None, "解密失敗，請確認密碼"
-
-
-def build_results_html(invoice_rows, mileage_allowance):
-    """
-    invoice_rows: list of (total, tax) 每張發票
-    回傳仿試算表的 HTML 字串
-    """
-    total_amount = sum(r[0] for r in invoice_rows)
-    total_tax    = sum(r[1] for r in invoice_rows)
-    km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
-    amt = km * 7
-
-    TD    = "border:1px solid #bbb;padding:6px 10px;font-size:13px;font-family:Arial,sans-serif;"
-    TDNUM = TD + "text-align:right;"
-    HDR   = TD + "background:#1F4E79;color:#fff;font-weight:700;text-align:center;font-size:13px;"
-    SUB   = TD + "background:#D6E4F0;font-weight:700;text-align:center;"
-    TOT   = TD + "background:#BDD7EE;font-weight:700;"
-    BLK   = "border:none;background:transparent;width:16px;"
-
-    right_rows = [
-        ("總里程津貼",          f"{int(mileage_allowance):,}" if mileage_allowance else "—",
-         "#FFF2CC", "#1F4E79", True),
-        ("加油發票合計",         f"{total_amount:,}",  "#FFFFFF", "#333", False),
-        ("發票稅額合計",         f"{total_tax:,}",     "#FCE4D6", "#C00000", False),
-        ("Personal Car 公里數",  f"{km:,}",            "#E2EFDA", "#C00000", True),
-        ("Personal Car 金額",    f"{amt:,}",           "#E2EFDA", "#333", False),
-        ("Fuel（油資補助）",     f"{total_amount:,}",  "#FFFFFF", "#333", False),
-    ]
-
-    rows_html = ""
-    for i in range(10):
-        l1 = datetime.now().strftime('%Y/%m') if i < len(invoice_rows) else ""
-        l2 = f"{invoice_rows[i][0]:,}"        if i < len(invoice_rows) else ""
-        l3 = f"{invoice_rows[i][1]:,}"        if i < len(invoice_rows) else ""
-        if i < len(right_rows):
-            rl, rv, rbg, rc, rb = right_rows[i]
-            fw = "700" if rb else "400"
-            fs = "14px" if rb else "13px"
-            r1 = f'<td style="{TD}background:{rbg};">{rl}</td>'
-            r2 = f'<td style="{TDNUM}background:{rbg};color:{rc};font-weight:{fw};font-size:{fs};">{rv}</td>'
-        else:
-            r1 = f'<td style="{TD}"></td>'
-            r2 = f'<td style="{TD}"></td>'
-        rows_html += (
-            f'<tr>'
-            f'<td style="{TD}">{l1}</td>'
-            f'<td style="{TDNUM}">{l2}</td>'
-            f'<td style="{TDNUM}">{l3}</td>'
-            f'<td style="{BLK}"></td>'
-            f'{r1}{r2}</tr>'
-        )
-
-    formula = (
-        f"⌈({int(mileage_allowance):,} − {total_amount:,}) ÷ 7⌉ = {km:,} 公里"
-        if mileage_allowance else ""
-    )
-
-    html = (
-        '<div style="overflow-x:auto;">'
-        '<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;">'
-        '<colgroup>'
-        '<col style="width:13%"><col style="width:14%"><col style="width:12%">'
-        '<col style="width:2%">'
-        '<col style="width:35%"><col style="width:18%">'
-        '</colgroup>'
-        f'<tr><td colspan="3" style="{HDR}">加油發票登記</td>'
-        f'<td style="{BLK}"></td>'
-        f'<td colspan="2" style="{HDR}">申報金額計算</td></tr>'
-        f'<tr><td style="{SUB}">日期</td><td style="{SUB}">發票總額</td>'
-        f'<td style="{SUB}">發票稅額</td><td style="{BLK}"></td>'
-        f'<td style="{SUB}">項目</td><td style="{SUB}">金額 (TWD)</td></tr>'
-        + rows_html +
-        f'<tr><td style="{TOT}">合計</td>'
-        f'<td style="{TOT}text-align:right;">{total_amount:,}</td>'
-        f'<td style="{TOT}text-align:right;">{total_tax:,}</td>'
-        f'<td style="{BLK}"></td>'
-        f'<td colspan="2" style="{TD}font-size:11px;color:#666;">{formula}</td></tr>'
-        '</table></div>'
-    )
-    return html, total_amount, total_tax, km, amt
+            os.remove(xlsx_path)
+            os.remove(pdf_path)
+        except:
+            pass
+            
+        return pdf_bytes
+    except Exception as e:
+        st.error(f"PDF 轉換失敗: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════
@@ -520,7 +336,7 @@ with col_toll:
 
     if toll_pdf and te_excel and selected_sheet:
         if st.button("🚀 開始對帳與標註", type="primary", key="run_toll"):
-            with st.spinner("對帳比對、標註中以及 PDF 轉換中..."):
+            with st.spinner("對帳比對、標註中以及高精確度 PDF 轉換中..."):
                 try:
                     # 1. 解析 PDF
                     toll_pdf.seek(0)
@@ -535,6 +351,13 @@ with col_toll:
                     ws = wb[selected_sheet]
                     DATE_COL, TOLL_COL, ITEM_COL = 4, 11, 1
                     serial_map, matched = {}, set()
+
+                    # 注入頁面列印設定，保證 Excel 檔案下載後直接另存 PDF 也 100% 是一頁寬
+                    ws.sheet_properties.pageSetUpPr.fitToPage = True
+                    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+                    ws.page_setup.paperSize = '9'  # A4
+                    ws.page_setup.fitToWidth = 1
+                    ws.page_setup.fitToHeight = 0
 
                     # 將 PDF 的通行費匹配回 Excel 中
                     for row in range(8, ws.max_row + 1):
@@ -613,8 +436,9 @@ with col_toll:
                     excel_saved_bytes = out_excel.getvalue()
                     st.session_state.toll_excel = excel_saved_bytes
 
-                    # 5. 轉換 Excel 里程明細為橫向 A4 鎖定一頁寬 PDF
-                    st.session_state.mileage_pdf_out = convert_excel_to_pdf(excel_saved_bytes, selected_sheet)
+                    # 5. 直接將 Excel 轉換成 format 與 Logo 100% 相同、列印寬自適應為一頁的 PDF
+                    if LIBREOFFICE_AVAILABLE:
+                        st.session_state.mileage_pdf_out = convert_excel_to_pdf(excel_saved_bytes, selected_sheet)
 
                     # ── 標註遠通電收 PDF ──
                     font_path = find_font()
@@ -744,13 +568,16 @@ with col_toll:
                     mime="application/pdf"
                 )
         with dl3:
-            if st.session_state.mileage_pdf_out:
-                st.download_button(
-                    "💾 下載里程明細PDF (一頁寬橫向)",
-                    st.session_state.mileage_pdf_out,
-                    f"{selected_sheet}_里程明細.pdf",
-                    mime="application/pdf"
-                )
+            if LIBREOFFICE_AVAILABLE:
+                if st.session_state.mileage_pdf_out:
+                    st.download_button(
+                        "💾 下載原版格式里程 PDF (強制 1 頁寬)",
+                        st.session_state.mileage_pdf_out,
+                        f"{selected_sheet}_里程明細.pdf",
+                        mime="application/pdf"
+                    )
+            else:
+                st.info("💡 雲端尚未啟動 LibreOffice，但已為您的 Excel 預先植入「一頁寬」設定。請下載 Excel 並直接在電腦另存 PDF 即可，格式絕不跑掉。")
 
     # 合併 PDF 下載（停車費 + 標註遠通電收）
     if st.session_state.get('merged_pdf'):
