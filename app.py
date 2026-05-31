@@ -1,14 +1,14 @@
 """
-DN 費用申報整合工具 v4
-=====================
+DN 費用申報整合工具 v4 (隨附自動稽核報告版)
+========================================
 佈局：單頁寬版
-  上方：st.columns([2, 1])
-    左 2/3 → 通行費對帳（上傳T_E申請表＋遠通電收PDF）
-    右 1/3 → 加油費計算（手動輸入發票金額，顯示結算表）
+  上方：st.columns([3, 2])
+    左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁）
+    右 2/5 → 加油費計算（條碼/OCR雙軌解析發票金額，顯示結算表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
-  pip install streamlit openpyxl pdfplumber pymupdf pypdf pyzbar pillow opencv-python-headless
+  pip install streamlit openpyxl pdfplumber pymupdf pypdf pyzbar pillow opencv-python-headless pandas
   streamlit run app.py
 """
 
@@ -18,6 +18,7 @@ import openpyxl
 import pdfplumber
 import fitz  # PyMuPDF
 import io, os, re, math
+import pandas as pd
 from datetime import datetime
 from PIL import Image
 
@@ -64,11 +65,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Session State
+# Session State 初始化
 for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
-          'selected_sheet','mileage_manual','merged_pdf']:
+          'selected_sheet','mileage_manual','merged_pdf','audit_df']:
     if k not in st.session_state:
-        st.session_state[k] = None if k != 'mileage_manual' else 0
+        st.session_state[k] = None if k not in ['mileage_manual'] else 0
 
 # ═══════════════════════════════════════════
 # 工具函式
@@ -77,7 +78,8 @@ for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
 def format_date_slash(v):
     try:
         if isinstance(v, str):
-            return datetime.strptime(v.strip(), '%d-%b-%y').strftime('%Y/%m/%d')
+            # 嘗試轉換不同常見日期字串 (處理 29-May-26 或 2026/05/29)
+            return pd.to_datetime(v.strip()).strftime('%Y/%m/%d')
         if hasattr(v, 'strftime'):
             return v.strftime('%Y/%m/%d')
     except Exception:
@@ -93,7 +95,7 @@ def read_mileage_allowance(excel_bytes, sheet_name):
     for row in ws.iter_rows():
         vals = [c.value for c in row]
         if vals[0] is None and vals[1] == '小計':
-            return vals[9]   # 欄J = 里量津貼小計
+            return vals[9]   # 欄J = 里程津貼小計
     return None
 
 
@@ -129,7 +131,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
                         hex_val = text[29:37]
                         try:
                             total_amt = int(hex_val, 16)
-                            if 100 <= total_amt <= 5000:  # 設定合理過濾金額
+                            if 100 <= total_amt <= 5000:
                                 page_totals.append(total_amt)
                                 qr_success = True
                         except ValueError:
@@ -201,7 +203,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
 
 def parse_toll_from_pdf(pdf_bytes):
     """
-    解析通行費PDF
+    從遠通 PDF 解析通行費，並進行每日加總
     """
     toll_map = {}
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -209,12 +211,12 @@ def parse_toll_from_pdf(pdf_bytes):
             text = page.extract_text()
             if not text:
                 continue
-            for line in text.split('\n'):
-                parts = line.split()
-                if len(parts) >= 3 and re.match(r'\d{4}/\d{2}/\d{2}', parts[0]):
-                    amt = parts[2].replace('元', '')
-                    if amt.isdigit() and parts[0] not in toll_map:
-                        toll_map[parts[0]] = int(amt)
+            # 使用更彈性的正則表達式，適配各種字型與可能缺損的字元
+            rows = re.findall(r'(\d{4}/\d{2}/\d{2}).*?(\d+)[元]?\b', text)
+            for date_str, amt in rows:
+                std_date = format_date_slash(date_str)
+                if std_date:
+                    toll_map[std_date] = toll_map.get(std_date, 0) + int(amt)
     return toll_map
 
 
@@ -344,7 +346,7 @@ def build_results_html(invoice_rows, mileage_allowance):
 
 
 # ═══════════════════════════════════════════
-# 主要佈局：左 2/3（通行費）｜ 右 1/3（加油費）
+# 主要佈局：左 3/5（通行費）｜ 右 2/5（加油費）
 # ═══════════════════════════════════════════
 col_toll, col_fuel = st.columns([3, 2], gap="large")
 
@@ -380,20 +382,23 @@ with col_toll:
 
     if toll_pdf and te_excel and selected_sheet:
         if st.button("🚀 開始對帳與標註", type="primary", key="run_toll"):
-            with st.spinner("處理中..."):
+            with st.spinner("對帳比對與 PDF 標註中..."):
                 try:
+                    # 1. 解析 PDF
                     toll_pdf.seek(0)
                     toll_map = parse_toll_from_pdf(toll_pdf.read())
                     if not toll_map:
                         st.error("無法解析通行費PDF，請確認格式")
                         st.stop()
 
+                    # 2. 開啟並寫入 T_E 申報明細
                     te_excel.seek(0)
                     wb = openpyxl.load_workbook(te_excel)
                     ws = wb[selected_sheet]
                     DATE_COL, TOLL_COL, ITEM_COL = 4, 11, 1
                     serial_map, matched = {}, set()
 
+                    # 將 PDF 的通行費匹配回 Excel 中
                     for row in range(8, ws.max_row + 1):
                         raw_date = ws.cell(row=row, column=DATE_COL).value
                         if not raw_date: continue
@@ -407,6 +412,64 @@ with col_toll:
                                 except: serial_map[d_str] = f"項目 {item_val}"
                             matched.add(d_str)
 
+                    # 3. 雙向對帳稽核計算 (Excel 日常加總 vs PDF 日常加總)
+                    excel_daily = {}
+                    for row in range(8, ws.max_row + 1):
+                        raw_date = ws.cell(row=row, column=DATE_COL).value
+                        if not raw_date: continue
+                        d_str = format_date_slash(raw_date)
+                        if not d_str: continue
+                        
+                        val = ws.cell(row=row, column=TOLL_COL).value
+                        val_num = 0
+                        if val is not None:
+                            try:    val_num = int(float(val))
+                            except: pass
+                        excel_daily[d_str] = excel_daily.get(d_str, 0) + val_num
+
+                    # 合併並彙總
+                    all_dates = sorted(list(set(excel_daily.keys()) | set(toll_map.keys())))
+                    audit_rows = []
+                    for d in all_dates:
+                        ex_val = excel_daily.get(d, 0)
+                        pdf_val = toll_map.get(d, 0)
+                        diff = ex_val - pdf_val
+                        status = "✅ 匹配" if diff == 0 else "❌ 金額不符"
+                        audit_rows.append({
+                            "日期": d,
+                            "Excel金額": ex_val,
+                            "PDF金額": pdf_val,
+                            "差異": diff,
+                            "狀態": status
+                        })
+
+                    st.session_state.audit_df = pd.DataFrame(audit_rows)
+
+                    # 4. 將稽核報告寫入 Excel 中（新增一個稽核頁籤）
+                    audit_sheet_name = f"對帳稽核_{selected_sheet}"
+                    if audit_sheet_name in wb.sheetnames:
+                        del wb[audit_sheet_name]
+                    audit_ws = wb.create_sheet(title=audit_sheet_name)
+                    
+                    headers = ["日期", "Excel金額", "PDF金額", "差異", "狀態"]
+                    audit_ws.append(headers)
+                    # 美化稽核頁籤表頭
+                    for col_num, header in enumerate(headers, 1):
+                        cell = audit_ws.cell(row=1, column=col_num)
+                        cell.font = openpyxl.styles.Font(bold=True, color="FFFFFF")
+                        cell.fill = openpyxl.styles.PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+                        cell.alignment = openpyxl.styles.Alignment(horizontal="center")
+
+                    for r in audit_rows:
+                        audit_ws.append([r["日期"], r["Excel金額"], r["PDF金額"], r["差異"], r["狀態"]])
+
+                    # 自動調整欄寬
+                    for col in audit_ws.columns:
+                        max_len = max(len(str(cell.value or '')) for cell in col)
+                        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+                        audit_ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+                    # 存檔明細檔
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
                     st.session_state.toll_excel = out_excel.getvalue()
@@ -432,7 +495,7 @@ with col_toll:
                                 fontname="cf" if font_path else "helv", color=(0, 0, 0.7)
                             )
 
-                    # ── 標註後儲存（獨立下載用）──
+                    # ── 標註後儲存 ──
                     out_toll_only = io.BytesIO()
                     doc.save(out_toll_only)
                     st.session_state.toll_pdf_out = out_toll_only.getvalue()
@@ -445,33 +508,23 @@ with col_toll:
                         parking_doc = fitz.open(stream=parking_pdf.read(), filetype="pdf")
                         merged_doc  = fitz.open()
                         merged_doc.insert_pdf(parking_doc)   # 停車費優先
-                        merged_doc.insert_pdf(doc)            # 標註後遠通電收接序
+                        merged_doc.insert_pdf(doc)            # 標註遠通
                         parking_doc.close()
 
-                        # ── 第一次嘗試：直接合併 ──
                         out_merged = io.BytesIO()
                         merged_doc.save(out_merged, garbage=4, deflate=True)
                         merged_bytes = out_merged.getvalue()
                         merged_size  = len(merged_bytes)
 
                         if merged_size > SIZE_LIMIT:
-                            # ── 超過 15MB → 逐步降低圖片品質壓縮 ──
-                            st.info(f"合併後 {merged_size/1024/1024:.1f}MB，開始壓縮...")
-
+                            st.info(f"合併後 {merged_size/1024/1024:.1f}MB，開始降階壓縮...")
                             compressed = None
                             for quality in [85, 75, 60, 45]:
                                 buf = io.BytesIO()
-                                merged_doc.save(
-                                    buf,
-                                    garbage=4,
-                                    deflate=True,
-                                    deflate_images=True,
-                                    deflate_fonts=True,
-                                )
+                                merged_doc.save(buf, garbage=4, deflate=True, deflate_images=True, deflate_fonts=True)
                                 comp_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
                                 out_comp = io.BytesIO()
 
-                                # 圖片頁重新渲染壓縮
                                 writer_doc = fitz.open()
                                 scale = 1.0
                                 if quality <= 75: scale = 0.85
@@ -482,18 +535,11 @@ with col_toll:
                                     mat = fitz.Matrix(scale, scale)
                                     pix = pg.get_pixmap(matrix=mat, alpha=False)
                                     img_pdf = fitz.open()
-                                    img_page = img_pdf.new_page(
-                                        width=pg.rect.width, height=pg.rect.height
-                                    )
-                                    img_page.insert_image(
-                                        img_page.rect,
-                                        pixmap=pix
-                                    )
+                                    img_page = img_pdf.new_page(width=pg.rect.width, height=pg.rect.height)
+                                    img_page.insert_image(img_page.rect, pixmap=pix)
                                     writer_doc.insert_pdf(img_pdf)
 
-                                writer_doc.save(
-                                    out_comp, garbage=4, deflate=True
-                                )
+                                writer_doc.save(out_comp, garbage=4, deflate=True)
                                 result = out_comp.getvalue()
                                 result_size = len(result)
 
@@ -535,15 +581,15 @@ with col_toll:
                     st.error(f"錯誤：{e}")
                     import traceback; st.code(traceback.format_exc())
 
-    # ── 下載區 ──
+    # ── 檔案下載區 ──
     dl1, dl2 = st.columns(2, gap="small")
     with dl1:
         if st.session_state.toll_excel:
             te_name = te_excel.name if te_excel else "T_E申請表.xlsx"
             st.download_button(
-                "💾 下載更新後的 Excel",
+                "💾 下載更新後的 Excel（含稽核頁籤）",
                 st.session_state.toll_excel,
-                f"{selected_sheet}_通行費_{te_name}",
+                f"{selected_sheet}_對帳稽核_{te_name}",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
     with dl2:
@@ -563,32 +609,47 @@ with col_toll:
         month_str = selected_sheet or datetime.now().strftime("%Y%m")
 
         if was_comp:
-            label = f"💾 下載合併PDF（已壓縮 {size_mb:.1f}MB，品質等級 {quality}）"
-            if size_mb > 15:
-                st.markdown("""<div class="warn-box">
-                ⚠️ 壓縮後仍超過15MB，建議手動調整或減少頁數
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f"""<div class="success-box">
-                ✅ 壓縮完成：{size_mb:.1f}MB（低於15MB限制）
-                </div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="success-box">
+            ✅ 壓縮完成：{size_mb:.1f}MB（低於15MB限制）
+            </div>""", unsafe_allow_html=True)
         else:
-            label = f"💾 下載合併PDF（{size_mb:.1f}MB，無需壓縮）"
             st.markdown(f"""<div class="success-box">
             ✅ 停車費＋遠通電收合併完成：{size_mb:.1f}MB
             </div>""", unsafe_allow_html=True)
 
         st.download_button(
-            label,
+            f"💾 下載合併PDF（{size_mb:.1f}MB）",
             data=st.session_state['merged_pdf'],
             file_name=f"{month_str}_停車費＋通行費.pdf",
             mime="application/pdf",
             type="primary"
         )
 
+    # 顯示自動生成的對帳稽核報告表
+    if st.session_state.audit_df is not None:
+        with st.expander("🔍 檢視通行費對帳稽核報告 (即時驗證)"):
+            st.markdown("**每日明細金額雙向稽核明細**")
+            
+            def highlight_diff(row):
+                if row['狀態'] == '❌ 金額不符':
+                    return ['background-color: #ffcccc'] * len(row)
+                return ['background-color: #e6ffed'] * len(row)
+            
+            st.dataframe(
+                st.session_state.audit_df.style.apply(highlight_diff, axis=1), 
+                use_container_width=True
+            )
+            
+            # 指標卡統計
+            c1, c2 = st.columns(2)
+            total_excel = int(st.session_state.audit_df['Excel金額'].sum())
+            total_pdf = int(st.session_state.audit_df['PDF金額'].sum())
+            c1.metric("Excel 總金額", f"{total_excel:,} 元")
+            c2.metric("遠通 PDF 總金額", f"{total_pdf:,} 元")
+
     # 通行費預覽
     if toll_pdf:
-        with st.expander("🔍 預覽遠通電收解析結果"):
+        with st.expander("🔍 預覽遠通電收原始解析結果"):
             toll_pdf.seek(0)
             pm = parse_toll_from_pdf(toll_pdf.read())
             if pm:
