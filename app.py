@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (加油發票括號與子字串定位加固版)
-======================================================
+DN 費用申報整合工具 v4 (同列特徵過濾、加油發票依日期精確排序版)
+===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間特齊對準排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -131,10 +131,11 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法 - 容錯加固版]：
+    [物理空間投影對齊演算法 - 特徵過濾版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
     2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
-    3. 按發票交易日期由舊到新排序。
+    3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
+    4. 按發票交易日期由舊到新排序。
     """
     pairs = []
     
@@ -150,7 +151,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
                 except:
                     continue
             
-            # 1. 提取高精準度發票金額 (500~5000) - [括號容錯升級]
+            # 1. 提取高精準度發票金額 (500~5000)
             valid_amounts = []
             for line in text.split('\n'):
                 # 允許金額與 TX 之間夾帶選用括號字元
@@ -182,17 +183,32 @@ def parse_fuel_pdf_totals(pdf_bytes):
                     std_d = date_match.group(1).replace('-', '/')
                     dates.append(((w['x0'] + w['x1'])/2, std_d))
             
-            # 為每一筆高精確金額尋找水平距離最貼近的發票日期 - [子字串包含加固]
+            # 3. 鄰近特徵過濾 (Same Line Check)
             for amt in valid_amounts:
                 amt_str = str(amt)
-                # 採用子字串包含比對，兼容 '1578元' 或 '金額:1578' 等格式
+                # 篩選出所有包含該金額的單字
                 matching_words = [w for w in words if amt_str in w['text']]
-                if matching_words and dates:
+                best_word = None
+                
+                if matching_words:
                     for mw in matching_words:
-                        ax = (mw['x0'] + mw['x1']) / 2
+                        # 抓取與該單字同一水平線（上下 4px 內）的所有單字
+                        line_words = [w['text'].upper() for w in words if abs(w['top'] - mw['top']) < 4]
+                        line_text = " ".join(line_words)
+                        # 必須包含交易行特徵，排除頂端空白垃圾數字
+                        if any(x in line_text for x in ["TX", "Tㄨ", "元", "合計", "金額"]):
+                            best_word = mw
+                            break
+                    
+                    if not best_word:
+                        best_word = matching_words[0]  # 若無，退回第一匹配
+                        
+                    ax = (best_word['x0'] + best_word['x1']) / 2
+                    if dates:
                         closest_date = min(dates, key=lambda d: abs(d[0] - ax))
                         pairs.append((closest_date[1], amt))
-                        break
+                    else:
+                        pairs.append(("9999/12/31", amt))
                 else:
                     pairs.append(("9999/12/31", amt))
                         
