@@ -204,6 +204,8 @@ def parse_fuel_pdf_totals(pdf_bytes):
 def parse_toll_from_pdf(pdf_bytes):
     """
     從遠通 PDF 解析通行費，並進行每日加總
+    [Surgical Bugfix]: 採用高精確度的「通行交易行」正則規則，
+    排除非交易日期(如:查詢時間、已於"xxxx/xx/xx"扣款等文字)。
     """
     toll_map = {}
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -211,9 +213,9 @@ def parse_toll_from_pdf(pdf_bytes):
             text = page.extract_text()
             if not text:
                 continue
-            # 使用更彈性的正則表達式，適配各種字型與可能缺損的字元
-            rows = re.findall(r'(\d{4}/\d{2}/\d{2}).*?(\d+)[元]?\b', text)
-            for date_str, amt in rows:
+            # 日期 ＋ 里程數(公里) ＋ 通行費(元) 的嚴格交易格式
+            rows = re.findall(r'(\d{4}/\d{2}/\d{2})\s+([\d\.]+)(?:公里)?\s+(\d+)(?:元)?', text)
+            for date_str, mileage, amt in rows:
                 std_date = format_date_slash(date_str)
                 if std_date:
                     toll_map[std_date] = toll_map.get(std_date, 0) + int(amt)
