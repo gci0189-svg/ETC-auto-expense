@@ -1,6 +1,6 @@
 """
-DN 費用申報整合工具 v4 (加油10張擴容、空間投影對齊與對照表即時同步版)
-===================================================================
+DN 費用申報整合工具 v4 (加油發票括號與子字串定位加固版)
+======================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
@@ -131,10 +131,10 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法]：
-    1. 採用極精確正則提取發票總金額 (排除雜訊代碼)
-    2. 使用 X 軸坐標最鄰近匹配，將金額與正確交易日期綁定 (不論日期在金額的上方還是下方)
-    3. 最後按交易日期由舊到新排序，100% 兼容 CPC 聯與 Formosa 聯
+    [物理空間投影對齊演算法 - 容錯加固版]：
+    1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
+    3. 按發票交易日期由舊到新排序。
     """
     pairs = []
     
@@ -150,11 +150,11 @@ def parse_fuel_pdf_totals(pdf_bytes):
                 except:
                     continue
             
-            # 1. 提取高精準度發票金額 (500~5000)
+            # 1. 提取高精準度發票金額 (500~5000) - [括號容錯升級]
             valid_amounts = []
             for line in text.split('\n'):
-                # 優先匹配 TX 金額
-                PAT_TX = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
+                # 允許金額與 TX 之間夾帶選用括號字元
+                PAT_TX = re.compile(r'(\d{3,5})\s*[\(（]?\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
                 tx_vals = [int(v) for v in PAT_TX.findall(line) if 500 <= int(v) <= 5000]
                 if tx_vals:
                     valid_amounts.extend(tx_vals)
@@ -182,10 +182,11 @@ def parse_fuel_pdf_totals(pdf_bytes):
                     std_d = date_match.group(1).replace('-', '/')
                     dates.append(((w['x0'] + w['x1'])/2, std_d))
             
-            # 為每一筆高精確金額尋找水平距離最貼近的發票日期
+            # 為每一筆高精確金額尋找水平距離最貼近的發票日期 - [子字串包含加固]
             for amt in valid_amounts:
                 amt_str = str(amt)
-                matching_words = [w for w in words if w['text'].strip() == amt_str]
+                # 採用子字串包含比對，兼容 '1578元' 或 '金額:1578' 等格式
+                matching_words = [w for w in words if amt_str in w['text']]
                 if matching_words and dates:
                     for mw in matching_words:
                         ax = (mw['x0'] + mw['x1']) / 2
