@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (物理列加總、發票依日期對齊排序與全域安全版)
-===================================================================
+DN 費用申報整合工具 v4 (物理分欄與數據鎖定加固版)
+============================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期物理分欄排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -131,10 +131,10 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法 - 特徵過濾版]：
+    [物理空間投影對齊演算法 - 分欄中點邊界版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
-    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
-    3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
+    3. 利用直欄中點（Column Midpoints）進行物理投影分欄，徹底解決多直列並排發票的位移問題。
     4. 按發票交易日期由舊到新排序。
     """
     pairs = []
@@ -173,44 +173,61 @@ def parse_fuel_pdf_totals(pdf_bytes):
             if not valid_amounts:
                 continue
                 
-            # 2. 空間投影比對 (物理 X 軸水平距離對齊)
+            # 2. 抓取頁面中所有的單字，並識別日期與其橫向 X 座標
             words = page.extract_words()
-            dates = []
+            dates = []  # 儲存 (x_center, date_str)
             for w in words:
                 txt = w['text'].strip()
                 date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', txt)
                 if date_match:
                     std_d = date_match.group(1).replace('-', '/')
-                    dates.append(((w['x0'] + w['x1'])/2, std_d))
+                    x_center = (w['x0'] + w['x1']) / 2
+                    dates.append((x_center, std_d))
             
-            # 為每一筆高精確金額尋找水平距離最貼近的發票日期 - [子字串包含加固]
+            # 將日期由左至右水平排序
+            dates.sort(key=lambda d: d[0])
+            
+            # 如果沒有找到日期，直接當作無日期綁定
+            if not dates:
+                for amt in valid_amounts:
+                    pairs.append(("9999/12/31", amt))
+                continue
+                
+            # 3. 建立水平邊界線，進行完美的直欄分欄
+            # 日期的數量代表總共有幾個直欄 (Column)
+            num_cols = len(dates)
+            midpoints = []
+            for idx in range(num_cols - 1):
+                midpoints.append((dates[idx][0] + dates[idx + 1][0]) / 2)
+            
+            # 定義分欄檢索函數
+            def get_column_date(x_coord):
+                # 尋找落在哪個區間
+                for col_idx, limit in enumerate(midpoints):
+                    if x_coord < limit:
+                        return dates[col_idx][1]
+                return dates[-1][1]  # 落在最後一個區間
+            
+            # 4. 對每個高精準度提取的發票金額，找到它在頁面中的 word 物件，進行特徵座標匹配
             for amt in valid_amounts:
                 amt_str = str(amt)
-                # 採用子字串包含比對，兼容 '1578元' 或 '金額:1578' 等格式
                 matching_words = [w for w in words if amt_str in w['text']]
-                best_word = None
-                
                 if matching_words:
+                    best_word = None
                     for mw in matching_words:
-                        # 抓取與該單字同一水平線（上下 4px 內）的所有單字
                         line_words = [w['text'].upper() for w in words if abs(w['top'] - mw['top']) < 4]
                         line_text = " ".join(line_words)
-                        # 必須包含交易行特徵，排除頂端空白垃圾數字
                         if any(x in line_text for x in ["TX", "Tㄨ", "元", "合計", "金額"]):
                             best_word = mw
                             break
-                    
                     if not best_word:
-                        best_word = matching_words[0]  # 若無，退回第一匹配
+                        best_word = matching_words[0]
                         
                     ax = (best_word['x0'] + best_word['x1']) / 2
-                    if dates:
-                        closest_date = min(dates, key=lambda d: abs(d[0] - ax))
-                        pairs.append((closest_date[1], amt))
-                    else:
-                        pairs.append(("9999/12/31", amt))
+                    assigned_date = get_column_date(ax)
+                    pairs.append((assigned_date, amt))
                 else:
-                    pairs.append(("9999/12/31", amt))
+                    pairs.append((dates[-1][1], amt))
                         
     # 依日期由舊到新排序並去重
     seen_amounts = set()
@@ -455,10 +472,11 @@ with col_toll:
                 （已同步至右側加油費計算）
                 </div>""", unsafe_allow_html=True)
 
-            # ── 🚀 [即時自動解析機制：物理列累加版] ──
-            # 上傳 Excel 及選定月份後，自動背景加總 K 與 L 欄的小計並寫入 State (避免公式不刷新)
+            # ── 🚀 [即時自動解析機制：物理列加總版] ──
+            # 優先讀取對帳標註後的 Excel 二進位檔案，防止上傳加油發票時金額洗回原始的 4,090
+            active_bytes = st.session_state.toll_excel if st.session_state.toll_excel is not None else excel_bytes
             try:
-                wb_auto = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+                wb_auto = openpyxl.load_workbook(io.BytesIO(active_bytes), data_only=True)
                 if selected_sheet in wb_auto.sheetnames:
                     ws_auto = wb_auto[selected_sheet]
                     t_total = 0
@@ -471,7 +489,7 @@ with col_toll:
                                 is_sub = True
                                 break
                         if is_sub:
-                            continue  # 忽略小計儲存格本身，防止抓到公式未計算的 0 或舊快取
+                            continue  # 忽略小計儲存格本身，防止公式未刷新的 0 或舊快取干擾
                         
                         val_k = ws_auto.cell(row=r, column=11).value  # 過路費 (K欄)
                         val_l = ws_auto.cell(row=r, column=12).value  # 停車費 (L欄)
@@ -562,13 +580,13 @@ with col_toll:
                     tolls_total = 0
                     parking_total = 0
                     for r in range(8, ws.max_row + 1):
-                        is_subtotal = False
+                        is_sub_col = False
                         for col_idx in [1, 2, 3]:
                             val = ws.cell(row=r, column=col_idx).value
                             if val and str(val).strip() == "小計":
-                                is_subtotal = True
+                                is_sub_col = True
                                 break
-                        if is_subtotal:
+                        if is_sub_col:
                             continue  # 忽略小計行本身
                             
                         val_k = ws.cell(row=r, column=11).value  # 過路費 (K欄)
@@ -1012,6 +1030,7 @@ with col_fuel:
 
     # 有資料就即時顯示結算表
     if invoice_rows:
+        st.markdown("---")
         html_table, total_amount, total_tax, km, amt = build_results_html(
             invoice_rows, mileage_input
         )
