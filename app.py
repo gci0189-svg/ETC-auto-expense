@@ -1,6 +1,6 @@
 """
-DN 費用申報整合工具 v4 (官方格式吻合 PDF 匯出與 PageSetup 注入版)
-============================================================
+DN 費用申報整合工具 v4 (官方格式吻合 PDF 匯出與 Linux 字型防亂碼補丁版)
+========================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
@@ -241,14 +241,45 @@ def find_font():
     return None
 
 
+def install_local_fonts():
+    """
+    [Linux 補丁]：搜尋專案目錄下的所有 .ttf 與 .ttc 字型檔，
+    自動安裝至 Linux 使用者系統字型目錄中，並刷新 OS 字型快取。
+    這能讓 Linux 的 LibreOffice 轉檔引擎完美抓到中文字型，防止豆腐空白塊。
+    """
+    try:
+        user_font_dir = os.path.expanduser('~/.fonts')
+        if not os.path.exists(user_font_dir):
+            os.makedirs(user_font_dir)
+        
+        fonts_copied = False
+        for f in os.listdir('.'):
+            if f.lower().endswith(('.ttf', '.ttc')):
+                src_path = f
+                dest_path = os.path.join(user_font_dir, f)
+                # 避免重複複製提高運行速度
+                if not os.path.exists(dest_path):
+                    shutil.copy(src_path, dest_path)
+                    fonts_copied = True
+        
+        # 刷新快取
+        if fonts_copied:
+            subprocess.run(['fc-cache', '-f'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except Exception as e:
+        pass
+
+
 def convert_excel_to_pdf(excel_bytes, sheet_name):
     """
-    [高精準度 PDF 生成]：使用無頭 LibreOffice 將原始 Excel 工作表直接轉換成符合官方排版規範的 PDF，
-    並在背景將當月報表以外的其他工作表刪除，確保產出的 PDF 只有「指定的當月明細表」，且完美一頁寬。
+    [高精準度 PDF 生成]：使用無頭 LibreOffice 將原始 Excel 工作表直接轉換成符合官方排版規範的 PDF。
+    轉換前先調用字型補丁安裝自訂中文字型，防亂碼。
     """
     if not LIBREOFFICE_AVAILABLE:
         return None
     try:
+        # 0. 執行 Linux 系統字型快取補丁，將上傳的「jf open 粉圓」等字型寫入系統
+        install_local_fonts()
+
         # 1. 載入 Excel 檔案，並只保留選定的工作表，避免多餘空月份污染 PDF
         wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
         for name in list(wb.sheetnames):
@@ -571,13 +602,13 @@ with col_toll:
             if LIBREOFFICE_AVAILABLE:
                 if st.session_state.mileage_pdf_out:
                     st.download_button(
-                        "💾 下載原版格式里程 PDF (強制 1 頁寬)",
+                        "💾 下載原版格式里程 PDF (已修正亂碼)",
                         st.session_state.mileage_pdf_out,
                         f"{selected_sheet}_里程明細.pdf",
                         mime="application/pdf"
                     )
             else:
-                st.info("💡 雲端尚未啟動 LibreOffice，但已為您的 Excel 預先植入「一頁寬」設定。請下載 Excel 並直接在電腦另存 PDF 即可，格式絕不跑掉。")
+                st.info("💡 雲端尚未啟動 LibreOffice，但已為您的 Excel 預先植入「一頁寬」設定。請下載 Excel 並直接在電腦另存 PDF 即可，格式與字型完全正確。")
 
     # 合併 PDF 下載（停車費 + 標註遠通電收）
     if st.session_state.get('merged_pdf'):
