@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (同列特徵過濾、加油發票依日期精確排序版)
+DN 費用申報整合工具 v4 (即時自動加總小計與 Concur 對照表無縫同步版)
 ===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間特齊對準排序，即時同步至最上方 Concur 快速填寫對照表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -183,10 +183,10 @@ def parse_fuel_pdf_totals(pdf_bytes):
                     std_d = date_match.group(1).replace('-', '/')
                     dates.append(((w['x0'] + w['x1'])/2, std_d))
             
-            # 3. 鄰近特徵過濾 (Same Line Check)
+            # 為每一筆高精確金額尋找水平距離最貼近的發票日期 - [子字串包含加固]
             for amt in valid_amounts:
                 amt_str = str(amt)
-                # 篩選出所有包含該金額的單字
+                # 採用子字串包含比對，兼容 '1578元' 或 '金額:1578' 等格式
                 matching_words = [w for w in words if amt_str in w['text']]
                 best_word = None
                 
@@ -445,7 +445,8 @@ with col_toll:
 
         if selected_sheet:
             te_excel.seek(0)
-            allowance = read_mileage_allowance(te_excel.read(), selected_sheet)
+            excel_bytes = te_excel.read()
+            allowance = read_mileage_allowance(excel_bytes, selected_sheet)
             if allowance:
                 st.session_state.mileage_allowance = allowance
                 st.markdown(f"""
@@ -453,6 +454,31 @@ with col_toll:
                 ✅ <b>{selected_sheet}</b> 里程津貼小計：<b>NT$ {int(allowance):,}</b>
                 （已同步至右側加油費計算）
                 </div>""", unsafe_allow_html=True)
+
+            # ── 🚀 [即時自動解析機制]：上傳 Excel 及選定月份後，自動背景加總 K 與 L 欄的小計並寫入 State ──
+            try:
+                wb_auto = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+                if selected_sheet in wb_auto.sheetnames:
+                    ws_auto = wb_auto[selected_sheet]
+                    t_total = 0
+                    p_total = 0
+                    for r in range(8, ws_auto.max_row + 1):
+                        is_sub = False
+                        for col_idx in [1, 2, 3]:
+                            val = ws_auto.cell(row=r, column=col_idx).value
+                            if val and str(val).strip() == "小計":
+                                is_sub = True
+                                break
+                        if is_sub:
+                            val_k = ws_auto.cell(row=r, column=11).value  # 過路費 (K欄)
+                            val_l = ws_auto.cell(row=r, column=12).value  # 停車費 (L欄)
+                            if val_k is not None: t_total = int(float(val_k))
+                            if val_l is not None: p_total = int(float(val_l))
+                            break
+                    # 即時更新全域 state，實現零按鍵一上傳立刻顯示通行停車費總和
+                    st.session_state.tolls_parking_amount = t_total + p_total
+            except:
+                pass
 
     if toll_pdf and te_excel and selected_sheet:
         if st.button("🚀 開始對帳與標註", type="primary", key="run_toll"):
