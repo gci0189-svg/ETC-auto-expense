@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (加油10張擴容、日期精確排序與對照表即時同步版)
+DN 費用申報整合工具 v4 (加油10張擴容、空間投影對齊與對照表即時同步版)
 ===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期排序，即時同步至最上方 Concur 快速填寫對照表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -131,8 +131,10 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    雙軌制加油發票解析：
-    自動掃描發票上的交易日期與總金額進行「綁定」，並按交易日期由舊到新排序。
+    [物理空間投影對齊演算法]：
+    1. 採用極精確正則提取發票總金額 (排除雜訊代碼)
+    2. 使用 X 軸坐標最鄰近匹配，將金額與正確交易日期綁定 (不論日期在金額的上方還是下方)
+    3. 最後按交易日期由舊到新排序，100% 兼容 CPC 聯與 Formosa 聯
     """
     pairs = []
     
@@ -148,20 +150,14 @@ def parse_fuel_pdf_totals(pdf_bytes):
                 except:
                     continue
             
-            current_date = "9999/12/31"  # 若未掃描到日期，則置於最底
-            
+            # 1. 提取高精準度發票金額 (500~5000)
+            valid_amounts = []
             for line in text.split('\n'):
-                # 匹配交易日期 (格式如 2026-05-04 或 2026/05/04)
-                date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', line)
-                if date_match:
-                    current_date = date_match.group(1).replace('-', '/')
-                
                 # 優先匹配 TX 金額
                 PAT_TX = re.compile(r'(\d{3,5})\s*(?:TX|T[X×Xx]|1Ⅸ|Ⅸ)\b')
                 tx_vals = [int(v) for v in PAT_TX.findall(line) if 500 <= int(v) <= 5000]
                 if tx_vals:
-                    for val in tx_vals:
-                        pairs.append((current_date, val))
+                    valid_amounts.extend(tx_vals)
                     continue
                 
                 # 備援匹配總計字樣
@@ -170,23 +166,46 @@ def parse_fuel_pdf_totals(pdf_bytes):
                 for pat in [PAT_TOTAL, PAT_CONCAT]:
                     vals = [int(v) for v in pat.findall(line) if 500 <= int(v) <= 5000]
                     if vals:
-                        for val in vals:
-                            pairs.append((current_date, val))
+                        valid_amounts.extend(vals)
                         break
+            
+            if not valid_amounts:
+                continue
+                
+            # 2. 空間投影比對 (物理 X 軸水平距離對齊)
+            words = page.extract_words()
+            dates = []
+            for w in words:
+                txt = w['text'].strip()
+                date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', txt)
+                if date_match:
+                    std_d = date_match.group(1).replace('-', '/')
+                    dates.append(((w['x0'] + w['x1'])/2, std_d))
+            
+            # 為每一筆高精確金額尋找水平距離最貼近的發票日期
+            for amt in valid_amounts:
+                amt_str = str(amt)
+                matching_words = [w for w in words if w['text'].strip() == amt_str]
+                if matching_words and dates:
+                    for mw in matching_words:
+                        ax = (mw['x0'] + mw['x1']) / 2
+                        closest_date = min(dates, key=lambda d: abs(d[0] - ax))
+                        pairs.append((closest_date[1], amt))
+                        break
+                else:
+                    pairs.append(("9999/12/31", amt))
                         
-    # 去除重複發票金額，並依照日期由舊到新排序
+    # 依日期由舊到新排序並去重
     seen_amounts = set()
-    unique_sorted_amounts = []
+    unique_sorted = []
     
-    # 依日期字串進行排序
     pairs.sort(key=lambda x: x[0])
-    
     for dt, amt in pairs:
         if amt not in seen_amounts:
             seen_amounts.add(amt)
-            unique_sorted_amounts.append(amt)
+            unique_sorted.append(amt)
             
-    return unique_sorted_amounts
+    return unique_sorted
 
 
 def parse_toll_from_pdf(pdf_bytes):
@@ -305,7 +324,7 @@ def convert_excel_to_pdf(excel_bytes, sheet_name):
 def build_results_html(invoice_rows, mileage_allowance):
     """
     invoice_rows: list of (total, tax) 每張發票
-    回傳仿試算表的 HTML 字串
+    回傳仿試算表的 HTML 字串 (動態支援至 10 列明細)
     """
     total_amount = sum(r[0] for r in invoice_rows)
     total_tax    = sum(r[1] for r in invoice_rows)
@@ -330,7 +349,7 @@ def build_results_html(invoice_rows, mileage_allowance):
     ]
 
     rows_html = ""
-    # 優雅呈現：最大呈現為 10 列
+    # 支援 10 組發票列印
     for i in range(10):
         l1 = datetime.now().strftime('%Y/%m') if i < len(invoice_rows) else ""
         l2 = f"{invoice_rows[i][0]:,}"        if i < len(invoice_rows) else ""
@@ -947,6 +966,11 @@ with col_fuel:
         html_table, total_amount, total_tax, km, amt = build_results_html(
             invoice_rows, mileage_input
         )
+        # 即時更新全域 state 以渲染最上方的對照表
+        st.session_state.fuel_amount = total_amount
+        st.session_state.fuel_tax = total_tax
+        st.session_state.mileage_distance = km
+        
         components.html(html_table, height=400, scrolling=False)
 
         # 快速摘要（方便複製數字）
