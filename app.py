@@ -1,5 +1,5 @@
 """
-DN 費用申報整合工具 v4 (即時自動加總小計與 Concur 對照表無縫同步版)
+DN 費用申報整合工具 v4 (物理列加總、發票依日期對齊排序與全域安全版)
 ===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
@@ -133,7 +133,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
     """
     [物理空間投影對齊演算法 - 特徵過濾版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
-    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
     3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
     4. 按發票交易日期由舊到新排序。
     """
@@ -455,7 +455,8 @@ with col_toll:
                 （已同步至右側加油費計算）
                 </div>""", unsafe_allow_html=True)
 
-            # ── 🚀 [即時自動解析機制]：上傳 Excel 及選定月份後，自動背景加總 K 與 L 欄的小計並寫入 State ──
+            # ── 🚀 [即時自動解析機制：物理列累加版] ──
+            # 上傳 Excel 及選定月份後，自動背景加總 K 與 L 欄的小計並寫入 State (避免公式不刷新)
             try:
                 wb_auto = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
                 if selected_sheet in wb_auto.sheetnames:
@@ -470,11 +471,16 @@ with col_toll:
                                 is_sub = True
                                 break
                         if is_sub:
-                            val_k = ws_auto.cell(row=r, column=11).value  # 過路費 (K欄)
-                            val_l = ws_auto.cell(row=r, column=12).value  # 停車費 (L欄)
-                            if val_k is not None: t_total = int(float(val_k))
-                            if val_l is not None: p_total = int(float(val_l))
-                            break
+                            continue  # 忽略小計儲存格本身，防止抓到公式未計算的 0 或舊快取
+                        
+                        val_k = ws_auto.cell(row=r, column=11).value  # 過路費 (K欄)
+                        val_l = ws_auto.cell(row=r, column=12).value  # 停車費 (L欄)
+                        try:
+                            if val_k is not None: t_total += int(float(val_k))
+                        except: pass
+                        try:
+                            if val_l is not None: p_total += int(float(val_l))
+                        except: pass
                     # 即時更新全域 state，實現零按鍵一上傳立刻顯示通行停車費總和
                     st.session_state.tolls_parking_amount = t_total + p_total
             except:
@@ -552,28 +558,29 @@ with col_toll:
 
                     st.session_state.audit_df = pd.DataFrame(audit_rows)
 
-                    # 3.5 定位「小計」列，直接提取過路費與停車費，免去手動心算
+                    # 3.5 [雙向物理累加計算]：繞過 Excel 公式限制，手動計算 K 與 L 欄之實體數值總和
                     tolls_total = 0
                     parking_total = 0
                     for r in range(8, ws.max_row + 1):
                         is_subtotal = False
-                        # 掃描前三欄，若偵測到 DN 申報表底部的「小計」字樣
                         for col_idx in [1, 2, 3]:
                             val = ws.cell(row=r, column=col_idx).value
                             if val and str(val).strip() == "小計":
                                 is_subtotal = True
                                 break
                         if is_subtotal:
-                            val_k = ws.cell(row=r, column=11).value  # 過路費 (K欄)
-                            val_l = ws.cell(row=r, column=12).value  # 停車費 (L欄)
-                            try:
-                                if val_k is not None: tolls_total = int(float(val_k))
-                            except: pass
-                            try:
-                                if val_l is not None: parking_total = int(float(val_l))
-                            except: pass
-                            break
-                    # 自動相加並記入全域變數，作為 Concur 面板數據來源
+                            continue  # 忽略小計行本身
+                            
+                        val_k = ws.cell(row=r, column=11).value  # 過路費 (K欄)
+                        val_l = ws.cell(row=r, column=12).value  # 停車費 (L欄)
+                        try:
+                            if val_k is not None: tolls_total += int(float(val_k))
+                        except: pass
+                        try:
+                            if val_l is not None: parking_total += int(float(val_l))
+                        except: pass
+                        
+                    # 完美填入對照表 State 中
                     st.session_state.tolls_parking_amount = tolls_total + parking_total
 
                     # 4. 將稽核報告寫入 Excel 中（新增一個稽核頁籤）
@@ -1005,7 +1012,6 @@ with col_fuel:
 
     # 有資料就即時顯示結算表
     if invoice_rows:
-        st.markdown("---")
         html_table, total_amount, total_tax, km, amt = build_results_html(
             invoice_rows, mileage_input
         )
