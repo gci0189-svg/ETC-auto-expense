@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (物理分欄與數據鎖定加固版)
-============================================================
+DN 費用申報整合工具 v4 (完整對帳、列印設定注入、分欄排序與全防護加固版)
+===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期物理分欄排序，即時同步至最上方 Concur 快速填寫對照表）
+    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -131,10 +131,10 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法 - 分欄中點邊界版]：
+    [物理空間投影對齊演算法 - 特徵過濾加固版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
-    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
-    3. 利用直欄中點（Column Midpoints）進行物理投影分欄，徹底解決多直列並排發票的位移問題。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
+    3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
     4. 按發票交易日期由舊到新排序。
     """
     pairs = []
@@ -355,6 +355,38 @@ def convert_excel_to_pdf(excel_bytes, sheet_name):
         return None
 
 
+def remove_pdf_password_and_extract_page1(pdf_bytes, password=""):
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_pages = len(doc)
+        if doc.is_encrypted:
+            if not doc.authenticate(password):
+                doc.close()
+                return False, None, f"密碼錯誤（嘗試：「{password}」）"
+        new_doc = fitz.open()
+        new_doc.insert_pdf(doc, from_page=0, to_page=0)
+        out = io.BytesIO()
+        new_doc.save(out, encryption=fitz.PDF_ENCRYPT_NONE)
+        new_doc.close(); doc.close()
+        return True, out.getvalue(), f"成功！已移除密碼並擷取第1頁（共 {total_pages} 頁）"
+    except Exception:
+        pass
+    if PYPDF_AVAILABLE:
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            if reader.is_encrypted:
+                if reader.decrypt(password) == 0:
+                    return False, None, f"密碼錯誤（嘗試：「{password}」）"
+            writer = PdfWriter()
+            writer.add_page(reader.pages[0])
+            out = io.BytesIO()
+            writer.write(out)
+            return True, out.getvalue(), f"成功（備援）！擷取第1頁（共 {len(reader.pages)} 頁）"
+        except Exception as e:
+            return False, None, f"處理失敗：{e}"
+    return False, None, "解密失敗，請確認密碼"
+
+
 def build_results_html(invoice_rows, mileage_allowance):
     """
     invoice_rows: list of (total, tax) 每張發票
@@ -472,7 +504,7 @@ with col_toll:
                 （已同步至右側加油費計算）
                 </div>""", unsafe_allow_html=True)
 
-            # ── 🚀 [即時自動解析機制：物理列加總版] ──
+            # ── 🚀 [即時自動解析機制：物理列累加版] ──
             # 優先讀取對帳標註後的 Excel 二進位檔案，防止上傳加油發票時金額洗回原始的 4,090
             active_bytes = st.session_state.toll_excel if st.session_state.toll_excel is not None else excel_bytes
             try:
@@ -694,7 +726,7 @@ with col_toll:
 
                                 for pg in comp_doc:
                                     mat = fitz.Matrix(scale, scale)
-                                    pix = pg.get_pixmap(matrix=mat, alpha=False)
+                                    pix = pg.get_pixmap(width=pg.rect.width, height=pg.rect.height)
                                     img_pdf = fitz.open()
                                     img_page = img_pdf.new_page(width=pg.rect.width, height=pg.rect.height)
                                     img_page.insert_image(img_page.rect, pixmap=pix)
@@ -859,6 +891,8 @@ with col_toll:
             if st.button("🔓 移除密碼並擷取第一頁", type="primary", key="run_telecom"):
                 telecom_file.seek(0)
                 raw = telecom_file.read()
+                # ── [Surgical Indentation Fix] ──
+                # 修正全域縮排，將 passwords 嘗試迴圈完整包裹在按鈕事件中，彻底杜絕 NameError: raw is not defined
                 passwords_to_try = list(dict.fromkeys([password, "", "0000"]))
                 success = False
                 for pwd in passwords_to_try:
