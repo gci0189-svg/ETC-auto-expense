@@ -1,10 +1,10 @@
 """
-DN 費用申報整合工具 v4 (終極自動對帳、物理分欄、硬碟暫存、全域安全與防崩潰版)
-========================================================================
+DN 費用申報整合工具 v4 (寬版面、手動輸入摺疊收合與全功能穩定加固版)
+===================================================================
 佈局：單頁寬版
-  上方：st.columns([3, 2])
-    左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
-    右 2/5 → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表）
+  上方：st.columns([1.2, 1], gap="large") ── 黃金寬版比例，給予右側充足空間
+    左 55% → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
+    右 45% → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表，輸入框預設摺疊收合）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
 
 安裝：
@@ -228,7 +228,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
     """
     [物理空間投影對齊演算法 - 特徵過濾與分欄中點邊界雙加固版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
-    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
     3. 利用直欄中點（Column Midpoints）進行物理投影分欄，徹底解決多直列並排發票的位移問題。
     4. 按發票交易日期由舊到新排序。
     """
@@ -369,6 +369,31 @@ def find_font():
         if os.path.exists(fp):
             return fp
     return None
+
+
+def install_local_fonts():
+    """
+    [Linux 補丁]：搜尋專案目錄下的所有 .ttf 與 .ttc 字型檔，
+    自動安裝至 Linux 使用者系統字型目錄中，並刷新 OS 字型快取。
+    """
+    try:
+        user_font_dir = os.path.expanduser('~/.fonts')
+        if not os.path.exists(user_font_dir):
+            os.makedirs(user_font_dir)
+        
+        fonts_copied = False
+        for f in os.listdir('.'):
+            if f.lower().endswith(('.ttf', '.ttc')):
+                src_path = f
+                dest_path = os.path.join(user_font_dir, f)
+                if not os.path.exists(dest_path):
+                    shutil.copy(src_path, dest_path)
+                    fonts_copied = True
+        
+        if fonts_copied:
+            subprocess.run(['fc-cache', '-f'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except Exception as e:
+        pass
 
 
 def convert_excel_to_pdf(excel_bytes, sheet_name):
@@ -551,9 +576,9 @@ def build_results_html(invoice_rows, mileage_allowance):
 
 
 # ═══════════════════════════════════════════
-# 主要佈局：左 3/5（通行費）｜ 右 2/5（加油費）
+# 主要佈局：左 55%（通行費）｜ 右 45%（加油費） ── 黃金比例拉寬，給予對照表呼吸感
 # ═══════════════════════════════════════════
-col_toll, col_fuel = st.columns([3, 2], gap="large")
+col_toll, col_fuel = st.columns([1.2, 1], gap="large")
 
 # ╔══════════════════════════════════════════╗
 # ║  左側：通行費對帳                        ║
@@ -587,7 +612,7 @@ with col_toll:
                 </div>""", unsafe_allow_html=True)
 
             # ── 🚀 [即時自動解析機制：主動鎖定數據] ──
-            # 優先讀取對帳標註後的 Excel 記憶體數據，防止二次上傳加油發票時資料重設為 4,090
+            # 優先讀取對帳標註後的 Excel 二進位檔案，防止上傳加油發票時金額洗回原始的 4,090
             active_bytes = st.session_state.toll_excel if st.session_state.toll_excel is not None else excel_bytes
             try:
                 wb_auto = openpyxl.load_workbook(io.BytesIO(active_bytes), data_only=True)
@@ -603,7 +628,7 @@ with col_toll:
                                 is_sub = True
                                 break
                         if is_sub:
-                            continue  # 忽略小計列本身，防止公式未刷新的 0 或舊快取干擾
+                            continue  # 忽略小計儲存格本身，防止公式未刷新的 0 或舊快取干擾
                         
                         val_k = ws_auto.cell(row=r, column=11).value  # 過路費 (K欄)
                         val_l = ws_auto.cell(row=r, column=12).value  # 停車費 (L欄)
@@ -1121,30 +1146,33 @@ with col_fuel:
                 ⚠️ 未自動解析到金額，請手動輸入
                 </div>""", unsafe_allow_html=True)
 
-    hc1, hc2 = st.columns([3, 2])
-    with hc1: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>發票總額</div>", unsafe_allow_html=True)
-    with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
-
+    # ── [優雅摺疊收合] ──
+    # 將 10 組發票手動微調輸入框預設摺疊收合，垂直空間瞬間精簡 90%，排版達到頂級美學
     invoice_rows = []
-    for i in range(1, 11):
-        ic1, ic2 = st.columns([3, 2])
-        with ic1:
-            total = st.number_input(
-                f"總額{i}", min_value=0, step=1,
-                key=f"inv_t{i}",
-                on_change=auto_tax, args=(i,),
-                label_visibility="collapsed"
-            )
-        with ic2:
-            tax = st.number_input(
-                f"稅額{i}", min_value=0, step=1,
-                key=f"inv_x{i}",
-                label_visibility="collapsed"
-            )
-        if total > 0:
-            invoice_rows.append((total, tax))
+    with st.expander("✍️ 手動微調 10 組發票金額（正常無須開啟）"):
+        hc1, hc2 = st.columns([3, 2])
+        with hc1: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>發票總額</div>", unsafe_allow_html=True)
+        with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
 
-    # 有資料就即時顯示結算表
+        for i in range(1, 11):
+            ic1, ic2 = st.columns([3, 2])
+            with ic1:
+                total = st.number_input(
+                    f"總額{i}", min_value=0, step=1,
+                    key=f"inv_t{i}",
+                    on_change=auto_tax, args=(i,),
+                    label_visibility="collapsed"
+                )
+            with ic2:
+                tax = st.number_input(
+                    f"稅額{i}", min_value=0, step=1,
+                    key=f"inv_x{i}",
+                    label_visibility="collapsed"
+                )
+            if total > 0:
+                invoice_rows.append((total, tax))
+
+    # 有資料就即時在【摺疊區外部】顯示結算表，保證結果永遠直觀可見
     if invoice_rows:
         st.markdown("---")
         html_table, total_amount, total_tax, km, amt = build_results_html(
