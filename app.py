@@ -1,8 +1,8 @@
 """
-DN 費用申報整合工具 v4 (1280px 物理寬度鎖定與半螢幕並排終極加固版)
+DN 費用申報整合工具 v4 (RWD 媒體查詢覆寫、物理分欄與數據鎖定加固版)
 ===================================================================
 佈局：單頁寬版
-  上方：st.columns([1.2, 1], gap="large") ── 黃金比例雙欄並排，且最大物理寬度鎖定為 1280px 並自動置中
+  上方：st.columns([1.2, 1], gap="large") ── 黃金比例雙欄並排，且強制在窄螢幕下永不折疊，鎖定橫向外觀
     左 55% → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
     右 45% → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表，輸入框預設摺疊收合）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
@@ -44,6 +44,44 @@ except ImportError:
 # 檢測雲端主機中是否安裝有 LibreOffice 執行檔
 SOFFICE_PATH = shutil.which('soffice') or shutil.which('libreoffice')
 LIBREOFFICE_AVAILABLE = SOFFICE_PATH is not None
+
+# ─────────────────────────────────────────
+# 頁面設定 & 媒體查詢解鎖補丁
+# ─────────────────────────────────────────
+st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page_icon="🚗")
+
+st.markdown("""
+<style>
+  .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:1280px!important;margin:0 auto!important}
+  section[data-testid="stMain"] > div {padding-left:1rem}
+  h1,h2,h3{margin-top:0}
+  h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
+  h3{font-size:1rem!important;color:#333}
+  .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .warn-box{background:#FFF8E1;border-left:4px solid #F59E0B;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .info-box{background:#E8F4FD;border-left:4px solid #1F4E79;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .section-title{font-size:1.05rem;font-weight:700;color:#1F4E79;
+                 border-bottom:2px solid #1F4E79;padding-bottom:4px;margin-bottom:.8rem}
+                 
+  /* 🚀 [強制雙欄不折疊補丁]：強行解除 Streamlit 窄螢幕垂直折疊限制，維持左右分欄 */
+  [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    gap: 1.2rem !important;
+  }
+  [data-testid="column"] {
+    min-width: 0 !important;
+  }
+  
+  /* 🚀 [媒體查詢強力解鎖補丁]：覆寫 640px 媒體查詢限制，不論視窗再窄都絕對並排，不發生垂直堆疊 */
+  @media (max-width: 640px) {
+    div[data-testid="stHorizontalBlock"] {
+      flex-direction: row !important;
+      flex-wrap: nowrap !important;
+    }
+  }
+</style>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
 # 持久化硬碟暫存系統 (Auto-Save & Restore)
@@ -276,8 +314,7 @@ def parse_fuel_pdf_totals(pdf_bytes):
                 date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', txt)
                 if date_match:
                     std_d = date_match.group(1).replace('-', '/')
-                    x_center = (w['x0'] + w['x1']) / 2
-                    dates.append((x_center, std_d))
+                    dates.append(((w['x0'] + w['x1'])/2, std_d))
             
             # 將日期由左至右水平排序
             dates.sort(key=lambda d: d[0])
@@ -542,7 +579,7 @@ def build_results_html(invoice_rows, mileage_allowance):
             f'<td style="{TD}">{l1}</td>'
             f'<td style="{TDNUM}">{l2}</td>'
             f'<td style="{TDNUM}">{l3}</td>'
-            f'<td style="{BLK}</td>'
+            f'<td style="{BLK}"></td>'
             f'{r1}{r2}</tr>'
         )
 
