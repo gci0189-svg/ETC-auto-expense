@@ -1,6 +1,6 @@
 """
-DN 費用申報整合工具 v4 (寬版面、手動輸入摺疊收合與全功能穩定加固版)
-===================================================================
+DN 費用申報整合工具 v4 (半螢幕強制並排與緊湊型結算表終極版)
+=========================================================
 佈局：單頁寬版
   上方：st.columns([1.2, 1], gap="large") ── 黃金寬版比例，給予右側充足空間
     左 55% → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
@@ -44,6 +44,36 @@ except ImportError:
 # 檢測雲端主機中是否安裝有 LibreOffice 執行檔
 SOFFICE_PATH = shutil.which('soffice') or shutil.which('libreoffice')
 LIBREOFFICE_AVAILABLE = SOFFICE_PATH is not None
+
+# ─────────────────────────────────────────
+# 頁面設定 & 半螢幕強制並排 RWD 破解 CSS
+# ─────────────────────────────────────────
+st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page_icon="🚗")
+
+st.markdown("""
+<style>
+  .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:100%}
+  section[data-testid="stMain"] > div {padding-left:1rem}
+  h1,h2,h3{margin-top:0}
+  h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
+  h3{font-size:1rem!important;color:#333}
+  .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .warn-box{background:#FFF8E1;border-left:4px solid #F59E0B;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .info-box{background:#E8F4FD;border-left:4px solid #1F4E79;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
+  .section-title{font-size:1.05rem;font-weight:700;color:#1F4E79;
+                 border-bottom:2px solid #1F4E79;padding-bottom:4px;margin-bottom:.8rem}
+                 
+  /* 🚀 [強制半螢幕並排補丁]：強行解除 Streamlit 窄螢幕垂直折疊限制，維持左右分欄 */
+  [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    gap: 1.2rem !important;
+  }
+  [data-testid="column"] {
+    min-width: 0 !important;
+  }
+</style>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
 # 持久化硬碟暫存系統 (Auto-Save & Restore)
@@ -371,31 +401,6 @@ def find_font():
     return None
 
 
-def install_local_fonts():
-    """
-    [Linux 補丁]：搜尋專案目錄下的所有 .ttf 與 .ttc 字型檔，
-    自動安裝至 Linux 使用者系統字型目錄中，並刷新 OS 字型快取。
-    """
-    try:
-        user_font_dir = os.path.expanduser('~/.fonts')
-        if not os.path.exists(user_font_dir):
-            os.makedirs(user_font_dir)
-        
-        fonts_copied = False
-        for f in os.listdir('.'):
-            if f.lower().endswith(('.ttf', '.ttc')):
-                src_path = f
-                dest_path = os.path.join(user_font_dir, f)
-                if not os.path.exists(dest_path):
-                    shutil.copy(src_path, dest_path)
-                    fonts_copied = True
-        
-        if fonts_copied:
-            subprocess.run(['fc-cache', '-f'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    except Exception as e:
-        pass
-
-
 def convert_excel_to_pdf(excel_bytes, sheet_name):
     """
     [高精準度 PDF 生成]：使用無頭 LibreOffice 將原始 Excel 工作表直接轉換成符合官方排版規範的 PDF。
@@ -504,12 +509,13 @@ def build_results_html(invoice_rows, mileage_allowance):
     km = math.ceil(max(0, mileage_allowance - total_amount) / 7) if mileage_allowance > 0 else 0
     amt = km * 7
 
-    TD    = "border:1px solid #bbb;padding:6px 10px;font-size:13px;font-family:Arial,sans-serif;"
+    # 🚀 [精密緊湊型 HTML 結算表補丁]：壓縮 Padding（4px 6px）和字型大小（11px），保證分割螢幕下完全塞入不被截斷
+    TD    = "border:1px solid #bbb;padding:4px 6px;font-size:11px;font-family:Arial,sans-serif;"
     TDNUM = TD + "text-align:right;"
-    HDR   = TD + "background:#1F4E79;color:#fff;font-weight:700;text-align:center;font-size:13px;"
+    HDR   = TD + "background:#1F4E79;color:#fff;font-weight:700;text-align:center;font-size:12px;"
     SUB   = TD + "background:#D6E4F0;font-weight:700;text-align:center;"
     TOT   = TD + "background:#BDD7EE;font-weight:700;"
-    BLK   = "border:none;background:transparent;width:16px;"
+    BLK   = "border:none;background:transparent;width:12px;"
 
     right_rows = [
         ("總里程津貼",          f"{int(mileage_allowance):,}" if mileage_allowance else "—",
@@ -530,7 +536,7 @@ def build_results_html(invoice_rows, mileage_allowance):
         if i < len(right_rows):
             rl, rv, rbg, rc, rb = right_rows[i]
             fw = "700" if rb else "400"
-            fs = "14px" if rb else "13px"
+            fs = "12px" if rb else "11px"
             r1 = f'<td style="{TD}background:{rbg};">{rl}</td>'
             r2 = f'<td style="{TDNUM}background:{rbg};color:{rc};font-weight:{fw};font-size:{fs};">{rv}</td>'
         else:
@@ -569,14 +575,14 @@ def build_results_html(invoice_rows, mileage_allowance):
         f'<td style="{TOT}text-align:right;">{total_amount:,}</td>'
         f'<td style="{TOT}text-align:right;">{total_tax:,}</td>'
         f'<td style="{BLK}"></td>'
-        f'<td colspan="2" style="{TD}font-size:11px;color:#666;">{formula}</td></tr>'
+        f'<td colspan="2" style="{TD}font-size:10px;color:#666;">{formula}</td></tr>'
         '</table></div>'
     )
     return html, total_amount, total_tax, km, amt
 
 
 # ═══════════════════════════════════════════
-# 主要佈局：左 55%（通行費）｜ 右 45%（加油費） ── 黃金比例拉寬，給予對照表呼吸感
+# 主要佈局：左 55%（通行費）｜ 右 45%（加油費） ── 強制橫向不折疊 RWD 補丁生效
 # ═══════════════════════════════════════════
 col_toll, col_fuel = st.columns([1.2, 1], gap="large")
 
