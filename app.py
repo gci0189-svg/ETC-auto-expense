@@ -1,5 +1,5 @@
 """
-DN 費用申報整合工具 v4 (完整對帳、列印設定注入、分欄排序與全防護加固版)
+DN 費用申報整合工具 v4 (物理列加總、發票依日期對齊排序與全域安全版)
 ===================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
@@ -18,6 +18,7 @@ import openpyxl
 import pdfplumber
 import fitz  # PyMuPDF
 import io, os, re, math
+import json
 import pandas as pd
 import shutil
 import tempfile
@@ -67,10 +68,115 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown(
-    '<p style="font-size:1rem;font-weight:700;color:#1F4E79;margin:0 0 0.8rem 0;">🚗 DN 費用申報整合工具</p>',
-    unsafe_allow_html=True
-)
+# ═══════════════════════════════════════════
+# 工具與回呼（Callback）全域函式
+# ═══════════════════════════════════════════
+
+STATE_DIR = ".state"
+
+def save_persistent_state():
+    """
+    [自動持久化暫存]：將當前進度與檔案寫入主機硬碟，防瀏覽器重新整理或關機。
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        
+        # 儲存純文字與數值參數
+        config = {}
+        for k in ['mileage_allowance', 'selected_sheet', 'mileage_manual', 
+                  'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax']:
+            config[k] = st.session_state.get(k)
+            
+        # 儲存 10 組加油發票值
+        for i in range(1, 11):
+            config[f"inv_t{i}"] = st.session_state.get(f"inv_t{i}", 0)
+            config[f"inv_x{i}"] = st.session_state.get(f"inv_x{i}", 0)
+            
+        with open(os.path.join(STATE_DIR, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+            
+        # 儲存生成的二進位檔案
+        bin_files = {
+            "toll_excel.xlsx": st.session_state.get("toll_excel"),
+            "toll_pdf_out.pdf": st.session_state.get("toll_pdf_out"),
+            "mileage_pdf_out.pdf": st.session_state.get("mileage_pdf_out"),
+            "merged_pdf.pdf": st.session_state.get("merged_pdf"),
+            "telecom_pdf.pdf": st.session_state.get("telecom_pdf")
+        }
+        for fname, content in bin_files.items():
+            fpath = os.path.join(STATE_DIR, fname)
+            if content is not None:
+                with open(fpath, "wb") as f:
+                    f.write(content)
+            elif os.path.exists(fpath):
+                os.remove(fpath)
+                
+        # 儲存稽核 DataFrame
+        audit_df = st.session_state.get("audit_df")
+        audit_path = os.path.join(STATE_DIR, "audit_df.csv")
+        if audit_df is not None:
+            audit_df.to_csv(audit_path, index=False)
+        elif os.path.exists(audit_path):
+            os.remove(audit_path)
+    except Exception:
+        pass
+
+
+def load_persistent_state():
+    """
+    [自動還原暫存]：系統啟動時若發現硬碟有前次未完結進度，自動無縫讀入。
+    """
+    if st.session_state.get("state_loaded"):
+        return
+        
+    try:
+        config_path = os.path.join(STATE_DIR, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                
+            # 還原文字與數值參數
+            for k, v in config.items():
+                st.session_state[k] = v
+                
+            # 還原檔案
+            bin_files = {
+                "toll_excel.xlsx": "toll_excel",
+                "toll_pdf_out.pdf": "toll_pdf_out",
+                "mileage_pdf_out.pdf": "mileage_pdf_out",
+                "merged_pdf.pdf": "merged_pdf",
+                "telecom_pdf.pdf": "telecom_pdf"
+            }
+            for fname, state_key in bin_files.items():
+                fpath = os.path.join(STATE_DIR, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, "rb") as f:
+                        st.session_state[state_key] = f.read()
+                        
+            # 還原稽核 DataFrame
+            audit_path = os.path.join(STATE_DIR, "audit_df.csv")
+            if os.path.exists(audit_path):
+                st.session_state.audit_df = pd.read_csv(audit_path)
+                
+        st.session_state.state_loaded = True
+    except Exception:
+        pass
+
+
+def clear_persistent_state():
+    """
+    [安全清除暫存]：徹底抹除硬碟暫存與 session_state，乾淨迎接新月份申報。
+    """
+    try:
+        if os.path.exists(STATE_DIR):
+            shutil.rmtree(STATE_DIR)
+    except Exception:
+        pass
+    # 徹底清除記憶體
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
 
 # Session State 初始化 (擴充至 10 張發票容量)
 for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
@@ -78,6 +184,9 @@ for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
           'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax']:
     if k not in st.session_state:
         st.session_state[k] = None if k not in ['mileage_manual', 'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax'] else 0
+
+# 載入歷史進度（在 APP 啟動時僅執行一次）
+load_persistent_state()
 
 # 加油發票金額與稅額狀態初始化 (10組)
 for i in range(1, 11):
@@ -90,9 +199,15 @@ for i in range(1, 11):
 invoice_rows = []
 mileage_input = 0
 
-# ═══════════════════════════════════════════
-# 工具與回呼（Callback）全域函式
-# ═══════════════════════════════════════════
+
+# 頂部導覽列：標題 ＋ 右側一鍵重置
+t_col1, t_col2 = st.columns([4, 1])
+with t_col1:
+    st.markdown('<p style="font-size:1rem;font-weight:700;color:#1F4E79;margin:0 0 0.8rem 0;">🚗 DN 費用申報整合工具</p>', unsafe_allow_html=True)
+with t_col2:
+    if st.button("🔄 一鍵重置 / 新月份對帳", type="secondary", use_container_width=True):
+        clear_persistent_state()
+
 
 def auto_tax(i):
     """
@@ -131,7 +246,7 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法 - 特徵過濾加固版]：
+    [物理空間投影對齊演算法 - 特徵過濾版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
     2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
     3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
@@ -274,31 +389,6 @@ def find_font():
         if os.path.exists(fp):
             return fp
     return None
-
-
-def install_local_fonts():
-    """
-    [Linux 補丁]：搜尋專案目錄下的所有 .ttf 與 .ttc 字型檔，
-    自動安裝至 Linux 使用者系統字型目錄中，並刷新 OS 字型快取。
-    """
-    try:
-        user_font_dir = os.path.expanduser('~/.fonts')
-        if not os.path.exists(user_font_dir):
-            os.makedirs(user_font_dir)
-        
-        fonts_copied = False
-        for f in os.listdir('.'):
-            if f.lower().endswith(('.ttf', '.ttc')):
-                src_path = f
-                dest_path = os.path.join(user_font_dir, f)
-                if not os.path.exists(dest_path):
-                    shutil.copy(src_path, dest_path)
-                    fonts_copied = True
-        
-        if fonts_copied:
-            subprocess.run(['fc-cache', '-f'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    except Exception as e:
-        pass
 
 
 def convert_excel_to_pdf(excel_bytes, sheet_name):
