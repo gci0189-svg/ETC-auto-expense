@@ -1,6 +1,6 @@
 """
-DN 費用申報整合工具 v4 (物理列加總、發票依日期對齊排序與全域安全版)
-===================================================================
+DN 費用申報整合工具 v4 (終極自動對帳、物理分欄、硬碟暫存與 Concur 快速填報版)
+========================================================================
 佈局：單頁寬版
   上方：st.columns([3, 2])
     左 3/5 → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
@@ -46,32 +46,8 @@ SOFFICE_PATH = shutil.which('soffice') or shutil.which('libreoffice')
 LIBREOFFICE_AVAILABLE = SOFFICE_PATH is not None
 
 # ─────────────────────────────────────────
-# 頁面設定
+# 持久化硬碟暫存系統 (Auto-Save & Restore)
 # ─────────────────────────────────────────
-st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page_icon="🚗")
-
-st.markdown("""
-<style>
-  .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:100%}
-  section[data-testid="stMain"] > div {padding-left:1rem}
-  h1,h2,h3{margin-top:0}
-  h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
-  h3{font-size:1rem!important;color:#333}
-  .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .warn-box{background:#FFF8E1;border-left:4px solid #F59E0B;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .info-box{background:#E8F4FD;border-left:4px solid #1F4E79;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .section-title{font-size:1.05rem;font-weight:700;color:#1F4E79;
-                 border-bottom:2px solid #1F4E79;padding-bottom:4px;margin-bottom:.8rem}
-  div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]{
-    border-right: 1px solid #e0e0e0;
-  }
-</style>
-""", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════
-# 工具與回呼（Callback）全域函式
-# ═══════════════════════════════════════════
-
 STATE_DIR = ".state"
 
 def save_persistent_state():
@@ -178,7 +154,7 @@ def clear_persistent_state():
     st.rerun()
 
 
-# Session State 初始化 (擴充至 10 張發票容量)
+# Session State 初始化 (確保全域變數存在)
 for k in ['toll_excel','toll_pdf_out','telecom_pdf','mileage_allowance',
           'selected_sheet','mileage_manual','merged_pdf','audit_df','mileage_pdf_out',
           'tolls_parking_amount', 'mileage_distance', 'fuel_amount', 'fuel_tax']:
@@ -208,6 +184,10 @@ with t_col2:
     if st.button("🔄 一鍵重置 / 新月份對帳", type="secondary", use_container_width=True):
         clear_persistent_state()
 
+
+# ═══════════════════════════════════════════
+# 工具與回呼（Callback）全域函式
+# ═══════════════════════════════════════════
 
 def auto_tax(i):
     """
@@ -246,9 +226,9 @@ def read_mileage_allowance(excel_bytes, sheet_name):
 
 def parse_fuel_pdf_totals(pdf_bytes):
     """
-    [物理空間投影對齊演算法 - 特徵過濾版]：
+    [物理空間投影對齊演算法 - 特徵過濾與括號容錯加固版]：
     1. 採用選用括號容錯正則，完美捕獲 Formosa 聯的 '1578 (TX)E' 格式。
-    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐報抓取問題。
+    2. 子字串安全對齊定位，解決 '1578元' 或 '金額:1578' 的 X 軸坐標抓取問題。
     3. 同列特徵過濾（Line Context Filter）：檢查該列是否包含 TX/元/金額 等，完美排除頂部垃圾數字。
     4. 按發票交易日期由舊到新排序。
     """
@@ -443,38 +423,6 @@ def convert_excel_to_pdf(excel_bytes, sheet_name):
     except Exception as e:
         st.error(f"PDF 轉換失敗: {e}")
         return None
-
-
-def remove_pdf_password_and_extract_page1(pdf_bytes, password=""):
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        total_pages = len(doc)
-        if doc.is_encrypted:
-            if not doc.authenticate(password):
-                doc.close()
-                return False, None, f"密碼錯誤（嘗試：「{password}」）"
-        new_doc = fitz.open()
-        new_doc.insert_pdf(doc, from_page=0, to_page=0)
-        out = io.BytesIO()
-        new_doc.save(out, encryption=fitz.PDF_ENCRYPT_NONE)
-        new_doc.close(); doc.close()
-        return True, out.getvalue(), f"成功！已移除密碼並擷取第1頁（共 {total_pages} 頁）"
-    except Exception:
-        pass
-    if PYPDF_AVAILABLE:
-        try:
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            if reader.is_encrypted:
-                if reader.decrypt(password) == 0:
-                    return False, None, f"密碼錯誤（嘗試：「{password}」）"
-            writer = PdfWriter()
-            writer.add_page(reader.pages[0])
-            out = io.BytesIO()
-            writer.write(out)
-            return True, out.getvalue(), f"成功（備援）！擷取第1頁（共 {len(reader.pages)} 頁）"
-        except Exception as e:
-            return False, None, f"處理失敗：{e}"
-    return False, None, "解密失敗，請確認密碼"
 
 
 def build_results_html(invoice_rows, mileage_allowance):
@@ -1041,145 +989,6 @@ with col_fuel:
         st.session_state.fuel_tax = 0
         st.session_state.mileage_distance = 0
 
-    # ── 右側：Concur 快速填寫對照面板 ──
-    st.markdown('<div class="section-title">📋 Concur 快速填寫對照表</div>', unsafe_allow_html=True)
-    
-    st.markdown(f"""
-    <div style="background:#F2F6FA; border-left:5px solid #1F4E79; padding:15px; border-radius:6px; margin-bottom:1.5rem;">
-      <p style="margin:0 0 10px 0; font-weight:700; color:#1F4E79; font-size:0.95rem;">💡 複製上月申報單後，僅需更新以下 3 筆動態欄位：</p>
-      <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
-        <tr style="border-bottom:1px solid #e0e0e0;">
-          <td style="padding:8px 0; font-weight:600; color:#333;">1. Personal Car Mileage</td>
-          <td style="text-align:right; padding:8px 0; font-weight:700; color:#C00000; font-size:1.15rem;">
-            {st.session_state.mileage_distance:,} <span style="font-size:0.8rem; font-weight:400; color:#555;">公里 (Distance)</span>
-          </td>
-        </tr>
-        <tr style="border-bottom:1px solid #e0e0e0;">
-          <td style="padding:8px 0; font-weight:600; color:#333;">2. Tolls/Road Charges/ Parking</td>
-          <td style="text-align:right; padding:8px 0; font-weight:700; color:#1F4E79; font-size:1.15rem;">
-            TWD {st.session_state.tolls_parking_amount:,} <span style="font-size:0.8rem; font-weight:400; color:#555;">(Amount)</span>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px 0; font-weight:600; color:#333;">3. Fuel</td>
-          <td style="text-align:right; padding:8px 0;">
-            <span style="font-weight:700; color:#333; font-size:1.15rem;">TWD {st.session_state.fuel_amount:,}</span> <span style="font-size:0.8rem; color:#555;">(Amount)</span><br>
-            <span style="font-weight:700; color:#D35400; font-size:1.1rem;">TWD {st.session_state.fuel_tax:,}</span> <span style="font-size:0.8rem; color:#555;">(Tax Amount)</span>
-          </td>
-        </tr>
-      </table>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">⛽ 加油費計算</div>', unsafe_allow_html=True)
-
-    # 里程津貼：優先從左側申請表自動帶入，直接寫入 session_state 確保同步
-    if st.session_state.mileage_allowance:
-        mileage_val = int(st.session_state.mileage_allowance)
-        if st.session_state.get("mileage_manual", 0) != mileage_val:
-            st.session_state["mileage_manual"] = mileage_val
-        st.markdown(f"""
-        <div class="info-box">
-        📊 里程津貼自動帶入：<b>NT$ {mileage_val:,}</b>
-        </div>""", unsafe_allow_html=True)
-
-    mileage_input = st.number_input(
-        "💰 總里程津貼（可手動修改）",
-        min_value=0,
-        step=100,
-        key="mileage_manual"
-    )
-
-    st.markdown("**🧾 加油發票**")
-
-    fuel_pdf_file = st.file_uploader(
-        "上傳加油發票PDF（自動解析總計金額）",
-        type="pdf", key="fuel_pdf_upload"
-    )
-
-    # 上傳PDF後自動解析、排序並填入
-    if fuel_pdf_file:
-        if st.button("🔍 自動解析發票金額", key="parse_fuel"):
-            with st.spinner("解析與日期自動排序中..."):
-                fuel_pdf_file.seek(0)
-                parsed = parse_fuel_pdf_totals(fuel_pdf_file.read())
-
-            if parsed:
-                # 填入前 10 張，多的截掉
-                for i, total in enumerate(parsed[:10], 1):
-                    st.session_state[f"inv_t{i}"] = total
-                    sales = round(total / 1.05)
-                    st.session_state[f"inv_x{i}"] = round(sales * 0.05)
-                # 剩餘欄位清空
-                for i in range(len(parsed[:10]) + 1, 11):
-                    st.session_state[f"inv_t{i}"] = 0
-                    st.session_state[f"inv_x{i}"] = 0
-
-                st.markdown(f"""
-                <div class="success-box">
-                ✅ 解析到 <b>{len(parsed)}</b> 筆發票（已依日期自動排序）：{parsed[:10]}
-                {"（超過10張，請分批上傳）" if len(parsed) > 10 else ""}
-                </div>""", unsafe_allow_html=True)
-                
-                # 強制觸發頁面刷新，使對照表立刻渲染
-                st.rerun()
-            else:
-                st.markdown("""
-                <div class="warn-box">
-                ⚠️ 未自動解析到金額，請手動輸入
-                </div>""", unsafe_allow_html=True)
-
-    hc1, hc2 = st.columns([3, 2])
-    with hc1: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>發票總額</div>", unsafe_allow_html=True)
-    with hc2: st.markdown("<div style='font-size:.8rem;color:#888;padding:2px 0'>稅額（可修改）</div>", unsafe_allow_html=True)
-
-    invoice_rows = []
-    for i in range(1, 11):
-        ic1, ic2 = st.columns([3, 2])
-        with ic1:
-            total = st.number_input(
-                f"總額{i}", min_value=0, step=1,
-                key=f"inv_t{i}",
-                on_change=auto_tax, args=(i,),
-                label_visibility="collapsed"
-            )
-        with ic2:
-            tax = st.number_input(
-                f"稅額{i}", min_value=0, step=1,
-                key=f"inv_x{i}",
-                label_visibility="collapsed"
-            )
-        if total > 0:
-            invoice_rows.append((total, tax))
-
-    # 有資料就即時顯示結算表
-    if invoice_rows:
-        st.markdown("---")
-        html_table, total_amount, total_tax, km, amt = build_results_html(
-            invoice_rows, mileage_input
-        )
-        # 即時更新全域 state 以渲染最上方的對照表
-        st.session_state.fuel_amount = total_amount
-        st.session_state.fuel_tax = total_tax
-        st.session_state.mileage_distance = km
-        
-        components.html(html_table, height=400, scrolling=False)
-
-        # 快速摘要（方便複製數字）
-        st.markdown(f"""
-        <div class="info-box" style="margin-top:.5rem">
-        <b>Concur 填寫摘要</b><br>
-        Fuel → Amount：<b>{total_amount:,}</b>　Tax Amount：<b>{total_tax:,}</b><br>
-        Personal Car → Distance：<b>{km:,} 公里</b>（金額 {amt:,}）
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div style="color:#aaa;text-align:center;padding:2rem 0;font-size:.9rem;">
-        輸入發票金額後即時顯示結算表
-        </div>""", unsafe_allow_html=True)
-
-
-st.markdown("""
-<div style="font-size:.75rem;color:#bbb;text-align:center;margin-top:2rem">
-🔒 所有資料僅在本機處理，不上傳任何伺服器
-</div>""", unsafe_allow_html=True)
+    # ── [背景自動存檔] ──
+    # 每輪渲染結束時，自動將所有 state 存入主機硬碟暫存中
+    save_persistent_state()
