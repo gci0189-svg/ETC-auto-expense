@@ -1,8 +1,8 @@
 """
-DN 費用申報整合工具 v4 (半螢幕強制並排與緊湊型結算表終極版)
-=========================================================
+DN 費用申報整合工具 v4 (1280px 物理寬度鎖定與半螢幕並排終極加固版)
+===================================================================
 佈局：單頁寬版
-  上方：st.columns([1.2, 1], gap="large") ── 黃金寬版比例，給予右側充足空間
+  上方：st.columns([1.2, 1], gap="large") ── 黃金比例雙欄並排，且最大物理寬度鎖定為 1280px 並自動置中
     左 55% → 通行費對帳（上傳T_E申請表＋遠通電收PDF，自動生成標註PDF、比對明細、並在Excel內附稽核報告頁與橫向PDF）
     右 45% → 加油費計算（自動解析最多10張發票，按日期空間對齊排序，即時同步至最上方 Concur 快速填寫對照表，輸入框預設摺疊收合）
   下方：橫線分隔 → 電信費處理（移除密碼＋擷取第一頁）
@@ -44,36 +44,6 @@ except ImportError:
 # 檢測雲端主機中是否安裝有 LibreOffice 執行檔
 SOFFICE_PATH = shutil.which('soffice') or shutil.which('libreoffice')
 LIBREOFFICE_AVAILABLE = SOFFICE_PATH is not None
-
-# ─────────────────────────────────────────
-# 頁面設定 & 半螢幕強制並排 RWD 破解 CSS
-# ─────────────────────────────────────────
-st.set_page_config(page_title="DN 費用申報整合工具", layout="wide", page_icon="🚗")
-
-st.markdown("""
-<style>
-  .block-container{padding-top:1rem;padding-bottom:1rem;padding-left:1rem;padding-right:1rem;max-width:100%}
-  section[data-testid="stMain"] > div {padding-left:1rem}
-  h1,h2,h3{margin-top:0}
-  h2{font-size:1.15rem!important;color:#1F4E79;border-bottom:2px solid #1F4E79;padding-bottom:4px}
-  h3{font-size:1rem!important;color:#333}
-  .success-box{background:#E8F5E9;border-left:4px solid #2E7D32;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .warn-box{background:#FFF8E1;border-left:4px solid #F59E0B;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .info-box{background:#E8F4FD;border-left:4px solid #1F4E79;padding:.6rem 1rem;border-radius:4px;margin:.4rem 0;font-size:.9rem}
-  .section-title{font-size:1.05rem;font-weight:700;color:#1F4E79;
-                 border-bottom:2px solid #1F4E79;padding-bottom:4px;margin-bottom:.8rem}
-                 
-  /* 🚀 [強制半螢幕並排補丁]：強行解除 Streamlit 窄螢幕垂直折疊限制，維持左右分欄 */
-  [data-testid="stHorizontalBlock"] {
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
-    gap: 1.2rem !important;
-  }
-  [data-testid="column"] {
-    min-width: 0 !important;
-  }
-</style>
-""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
 # 持久化硬碟暫存系統 (Auto-Save & Restore)
@@ -401,6 +371,31 @@ def find_font():
     return None
 
 
+def install_local_fonts():
+    """
+    [Linux 補丁]：搜尋專案目錄下的所有 .ttf 與 .ttc 字型檔，
+    自動安裝至 Linux 使用者系統字型目錄中，並刷新 OS 字型快取。
+    """
+    try:
+        user_font_dir = os.path.expanduser('~/.fonts')
+        if not os.path.exists(user_font_dir):
+            os.makedirs(user_font_dir)
+        
+        fonts_copied = False
+        for f in os.listdir('.'):
+            if f.lower().endswith(('.ttf', '.ttc')):
+                src_path = f
+                dest_path = os.path.join(user_font_dir, f)
+                if not os.path.exists(dest_path):
+                    shutil.copy(src_path, dest_path)
+                    fonts_copied = True
+        
+        if fonts_copied:
+            subprocess.run(['fc-cache', '-f'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except Exception as e:
+        pass
+
+
 def convert_excel_to_pdf(excel_bytes, sheet_name):
     """
     [高精準度 PDF 生成]：使用無頭 LibreOffice 將原始 Excel 工作表直接轉換成符合官方排版規範的 PDF。
@@ -547,7 +542,7 @@ def build_results_html(invoice_rows, mileage_allowance):
             f'<td style="{TD}">{l1}</td>'
             f'<td style="{TDNUM}">{l2}</td>'
             f'<td style="{TDNUM}">{l3}</td>'
-            f'<td style="{BLK}"></td>'
+            f'<td style="{BLK}</td>'
             f'{r1}{r2}</tr>'
         )
 
