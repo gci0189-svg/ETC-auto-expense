@@ -812,7 +812,8 @@ with col_toll:
                 st.info("💡 雲端尚未啟動 LibreOffice，請下載 Excel 後在電腦另存 PDF。")
 
     if st.session_state.get('merged_pdf'):
-        size_mb = st.session_state['merged_size'] / 1024 / 1024
+        merged_data = st.session_state.get('merged_pdf') or b''
+        size_mb = st.session_state.get('merged_size', len(merged_data)) / 1024 / 1024
         was_comp = st.session_state.get('merged_compressed', False)
         month_str = selected_sheet or datetime.now().strftime("%Y%m")
         label = f"✅ 壓縮完成：{size_mb:.1f}MB" if was_comp else f"✅ 合併完成：{size_mb:.1f}MB"
